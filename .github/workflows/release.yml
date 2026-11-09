@@ -27,7 +27,7 @@ jobs:
       - name: Merge binaries
         run: |
           python -m esptool --chip esp32s3 merge_bin \
-            -o cardputer-csi-${{ github.ref_name }}.bin \
+            -o cardputer-csi-st7789v-${{ github.ref_name }}.bin \
             --flash_mode qio --flash_size 8MB \
             0x0000 .pio/build/cardputer-radar-csi/bootloader.bin \
             0x8000 .pio/build/cardputer-radar-csi/partitions.bin \
@@ -36,5 +36,5 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: cardputer-csi-${{ github.ref_name }}.bin
+          files: cardputer-csi-st7789v-${{ github.ref_name }}.bin
           generate_release_notes: true

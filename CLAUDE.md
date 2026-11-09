@@ -16,7 +16,7 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 - **Console:** **Cardputer ADV** (ESP32-**S3**) connects to `SQUACHNET`, receives
   UDP frames on port 4210, runs the UI, drives two screens.
 - **Displays (different content per screen, NOT a clone):**
-  - Top = external **2.8" ILI9341** (320x240 @ rotation 7): PPI **radar scope**
+  - Top = external **Waveshare 2" ST7789V** (320x240 @ rotation `EXT_ROTATION`=1): PPI **radar scope**
     (rotating sweep + phosphor trail; motion>threshold paints stable contact
     blips — radius from RSSI, size/heat from motion).
   - Bottom = built-in 1.14" (240x135): WiFi IP, status pill, PRESENCE/CLEAR
@@ -43,8 +43,9 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 - **No PSRAM** (StampS3). Don't allocate a full 320x240 sprite. Pattern: render
   at 240x180 and scale-to-fit (`pushRotateZoom`). Two 240x180x16bpp canvases
   (~84 KB each) is the budget.
-- External panel = `include/ext_panel.h`: ILI9341, rotation 7,
-  CS5/RST3/DC6/MOSI14/SCK40, SPI2_HOST **shared with SD** (`bus_shared=true`),
+- External panel = `include/ext_panel.h`: Waveshare 2" ST7789V (IPS, `invert=true`,
+  no offsets), rotation `EXT_ROTATION` (1), CS5/RST3/DC6/MOSI14/SCK40, BL=GPIO4 (PWM,
+  `Light_PWM` ch 3), SPI2_HOST **shared with SD** (`bus_shared=true`),
   `rgb_order=false`, 27 MHz.
 - Display libs: **M5Unified + M5Cardputer (M5GFX/LovyanGFX)**, Arduino framework,
   platform espressif32@6.12.0, board m5stack-stamps3.
@@ -55,7 +56,7 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 - `src/main.cpp` — UI: `drawBottom()` (status), `drawTop()` (radar scope),
   `drawRaycaster()` (vaporwave 3D mode), `serviceKeys()`, fake generator.
   Bottom @30 fps, top @~8 fps.
-- `include/ext_panel.h` — external ILI9341 panel class.
+- `include/ext_panel.h` — external ST7789V panel class (`LGFX_ExtST7789`).
 - `tools/sensor_s3/` — S3 CSI sensor firmware (AP mode, UDP broadcast).
 - `tools/fake_c5/fake_c5.ino` — spare-S3 UART protocol emitter.
 

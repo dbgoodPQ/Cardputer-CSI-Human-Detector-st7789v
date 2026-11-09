@@ -1,52 +1,46 @@
 #ifndef EXT_PANEL_H
 #define EXT_PANEL_H
 //
-// External 2.8" ILI9341 (240x320) panel driver for the Cardputer ADV.
+// External Waveshare 2inch LCD module (ST7789V, 240x320, IPS) driver for the Cardputer ADV.
+// Replaces the 2.8" ILI9341 panel of the original project.
 //
-// Wiring (EXT header): CS=GPIO5 RST=GPIO3 DC=GPIO6 MOSI=GPIO14 SCK=GPIO40
-// Bus: SPI2_HOST (FSPI), shared with SD (bus_shared=true). Run at rotation 7.
+// Wiring (EXT header): CS=GPIO5 RST=GPIO3 DC=GPIO6 MOSI=GPIO14 SCK=GPIO40 BL=GPIO4
+// Bus: SPI2_HOST (FSPI), shared with SD (bus_shared=true).
+// Backlight: PWM on GPIO4, driven by setBrightness() (EXT PANEL setting in the menu).
 //
 #include <M5Unified.h>
-#include <lgfx/v1/panel/Panel_LCD.hpp>
+#include <lgfx/v1/panel/Panel_ST7789.hpp>
+#include <lgfx/v1/platforms/esp32/Light_PWM.hpp>
 
-struct Panel_ILI9341_Pork : public lgfx::v1::Panel_LCD {
-    Panel_ILI9341_Pork(void) {
-        _cfg.memory_width  = _cfg.panel_width  = 240;
-        _cfg.memory_height = _cfg.panel_height = 320;
-    }
-protected:
-    const uint8_t* getInitCommands(uint8_t listno) const override {
-        static constexpr uint8_t list0[] = {
-            0xEF, 3, 0x03, 0x80, 0x02,
-            0xCF, 3, 0x00, 0xC1, 0x30,
-            0xED, 4, 0x64, 0x03, 0x12, 0x81,
-            0xE8, 3, 0x85, 0x00, 0x78,
-            0xCB, 5, 0x39, 0x2C, 0x00, 0x34, 0x02,
-            0xF7, 1, 0x20,
-            0xEA, 2, 0x00, 0x00,
-            0xC0, 1, 0x23,
-            0xC1, 1, 0x10,
-            0xC5, 2, 0x3E, 0x28,
-            0xC7, 1, 0x86,
-            0xB1, 2, 0x00, 0x18,
-            0xB6, 3, 0x08, 0x82, 0x27,
-            0xF2, 1, 0x00,
-            0x26, 1, 0x01,
-            0xE0, 15, 0x0F,0x31,0x2B,0x0C,0x0E,0x08,0x4E,0xF1,0x37,0x07,0x10,0x03,0x0E,0x09,0x00,
-            0xE1, 15, 0x00,0x0E,0x14,0x03,0x11,0x07,0x31,0xC1,0x48,0x08,0x0F,0x0C,0x31,0x36,0x0F,
-            CMD_SLPOUT, CMD_INIT_DELAY, 120,
-            CMD_DISPON, CMD_INIT_DELAY, 120,
-            0xFF, 0xFF
-        };
-        return (listno == 0) ? list0 : nullptr;
-    }
-};
+#ifndef EXT_TFT_CS
+#define EXT_TFT_CS   5
+#endif
+#ifndef EXT_TFT_DC
+#define EXT_TFT_DC   6
+#endif
+#ifndef EXT_TFT_RST
+#define EXT_TFT_RST  3
+#endif
+#ifndef EXT_TFT_BL
+#define EXT_TFT_BL   4
+#endif
+#ifndef EXT_TFT_MOSI
+#define EXT_TFT_MOSI 14
+#endif
+#ifndef EXT_TFT_SCK
+#define EXT_TFT_SCK  40
+#endif
+// Landscape (320x240). 1 matches the Cardputer's built-in screen; use 3 to turn the picture 180°.
+#ifndef EXT_ROTATION
+#define EXT_ROTATION 1
+#endif
 
-class LGFX_ExtILI9341 : public lgfx::v1::LGFX_Device {
-    Panel_ILI9341_Pork _panel_instance;
-    lgfx::v1::Bus_SPI   _bus_instance;
+class LGFX_ExtST7789 : public lgfx::v1::LGFX_Device {
+    lgfx::v1::Panel_ST7789 _panel_instance;
+    lgfx::v1::Bus_SPI      _bus_instance;
+    lgfx::v1::Light_PWM    _light_instance;
 public:
-    LGFX_ExtILI9341() {
+    LGFX_ExtST7789() {
         {   auto cfg = _bus_instance.config();
             cfg.spi_host    = SPI2_HOST;     // FSPI — SAME host as the SD card
             cfg.spi_mode    = 0;
@@ -55,37 +49,43 @@ public:
             cfg.spi_3wire   = true;
             cfg.use_lock    = true;
             cfg.dma_channel = 0;
-            cfg.pin_sclk    = 40;
-            cfg.pin_mosi    = 14;
+            cfg.pin_sclk    = EXT_TFT_SCK;
+            cfg.pin_mosi    = EXT_TFT_MOSI;
             cfg.pin_miso    = -1;
-            cfg.pin_dc      = 6;
+            cfg.pin_dc      = EXT_TFT_DC;
             _bus_instance.config(cfg);
             _panel_instance.setBus(&_bus_instance);
         }
         {   auto cfg = _panel_instance.config();
-            cfg.pin_cs           = 5;
-            cfg.pin_rst          = 3;
+            cfg.pin_cs           = EXT_TFT_CS;
+            cfg.pin_rst          = EXT_TFT_RST;
             cfg.pin_busy         = -1;
             cfg.memory_width     = 240;
             cfg.memory_height    = 320;
             cfg.panel_width      = 240;
             cfg.panel_height     = 320;
-            cfg.offset_x         = 0;
+            cfg.offset_x         = 0;        // Waveshare 2inch: full 240x320 GRAM, no offsets
             cfg.offset_y         = 0;
             cfg.offset_rotation  = 0;
             cfg.dummy_read_pixel = 8;
             cfg.dummy_read_bits  = 1;
             cfg.readable         = false;
-            cfg.invert           = false;
+            cfg.invert           = true;     // IPS ST7789V needs colour inversion
             cfg.rgb_order        = false;
             cfg.dlen_16bit       = false;
             cfg.bus_shared       = true;     // shared with SD card
             _panel_instance.config(cfg);
         }
+        {   auto cfg = _light_instance.config();
+            cfg.pin_bl      = EXT_TFT_BL;
+            cfg.invert      = false;
+            cfg.freq        = 12000;
+            cfg.pwm_channel = 3;             // channel 7 is used by the built-in screen's backlight
+            _light_instance.config(cfg);
+            _panel_instance.setLight(&_light_instance);
+        }
         setPanel(&_panel_instance);
     }
-
-
 };
 
-#endif // PORK_EXT_PANEL_POC_H
+#endif // EXT_PANEL_H

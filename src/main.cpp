@@ -136,7 +136,7 @@ static void IRAM_ATTR csiCallback(void*, wifi_csi_info_t* info) {
 static RadarLink       radar;
 
 static M5Canvas        canvas(&M5Cardputer.Display);   // bottom (built-in) buffer
-static LGFX_ExtILI9341 extPanel;                       // external 2.8" ILI9341
+static LGFX_ExtST7789  extPanel;                       // external Waveshare 2" ST7789V
 static M5Canvas        topCanvas(&extPanel);           // top render buffer (240x180)
 static bool            extReady   = false;
 static float           gThreshold = 0.35f;
@@ -174,15 +174,19 @@ static void applyPalette(uint8_t idx) {
 
 static void applyBrightness() {
     M5Cardputer.Display.setBrightness((uint8_t)((uint32_t)gBright * 255 / 100));
-    // EXT panel BL is wired to 5V (not a GPIO) — brightness handled in applyExtBrightness()
+    // EXT panel BL is on GPIO4 (PWM) — set the external backlight directly
+    extPanel.setBrightness((uint8_t)((uint32_t)gExtBright * 255 / 100));
 }
 
-// Scale the topCanvas pixel buffer by gExtBright% before pushRotateZoom.
-// BL/LED on this module is wired to 5V (no GPIO control), so software dimming
-// is the only option. LovyanGFX SPI sprites store RGB565 big-endian (bytes
-// swapped), so bswap each pixel, scale R/G/B independently, then bswap back.
+// ST7789V fork: the Waveshare module's BL pin is wired to GPIO4, so EXT PANEL
+// brightness drives the backlight PWM (applyBrightness) instead of scaling pixels.
+// Pixel-buffer dimming is kept only as a fallback: build with -DEXT_SOFT_DIM=1
+// if BL is wired to 3V3 instead of GPIO4.
+#ifndef EXT_SOFT_DIM
+#define EXT_SOFT_DIM 0
+#endif
 static void applyExtBrightness() {
-    if (gExtBright >= 100) return;
+    if (!EXT_SOFT_DIM || gExtBright >= 100) return;
     uint16_t* buf = (uint16_t*)topCanvas.getBuffer();
     if (!buf) return;
     const uint32_t scale = (uint32_t)gExtBright * 256 / 100;
@@ -636,6 +640,7 @@ static void menuAdjust(int dir) {
             break;
         case 2:
             gExtBright = (uint8_t)constrain((int)gExtBright + (dir > 0 ? 10 : -10), 10, 100);
+            extPanel.setBrightness((uint8_t)((uint32_t)gExtBright * 255 / 100));
             break;
 #if defined(RADAR_CSI)
         case 3:
@@ -1697,7 +1702,7 @@ void setup() {
   canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
 
   extPanel.init();
-  extPanel.setRotation(7);
+  extPanel.setRotation(EXT_ROTATION);   // ST7789V landscape (was 7 on the ILI9341)
   extPanel.fillScreen(TFT_BLACK);
   topCanvas.setColorDepth(16);
   extReady = (topCanvas.createSprite(240, 180) != nullptr);  // 240x180 * EXT_ZOOM = 320x240, fills panel

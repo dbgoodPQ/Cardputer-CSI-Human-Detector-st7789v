@@ -1,107 +1,81 @@
-# Cardputer Human Detector
+# Cardputer Human Detector — ST7789V edition
 
-This tiny cyber deck is detecting people using Wi-Fi. No camera. No IR sensor. No thermal camera. Just Wi-Fi and this deeply cursed little radar screen.
+A fork of [**skizzophrenic/Cardputer-CSI-Human-Detector**](https://github.com/skizzophrenic/Cardputer-CSI-Human-Detector)
+that swaps the external 2.8" ILI9341 screen for a **Waveshare 2inch LCD module (ST7789V, 240x320, IPS)**.
 
-It uses Channel State Information (CSI), specifically the same Wi-Fi your router is already blasting everywhere, to detect when people are moving around. The human body is mostly water, and water messes with radio waves in very measurable ways. So we measure them.
-
-The whole build is around $50. Cardputer ADV is $30, grab [two of these TFT screens for $20](https://a.co/d/0bZbfTqO), find somebody with a 3D printer, and you've got yourself a handheld human radar that looks absolutely unhinged. I'm really, really happy with how this came out.
-
----
-
-## How it works
-
-Wi-Fi signals bounce off everything in a room: walls, furniture, doors, your cat, and that weird little flesh bag you call your body. CSI data captures the *fingerprint* of those reflections. When something moves, that fingerprint changes. This firmware tracks those changes and uses them to detect presence and motion in real time.
-
-It runs entirely on the Cardputer ADV. No external sensor, no second device. The ESP32-S3 is dual-core, so one core handles the sensing while the other drives the screens. Everything is self-contained.
+**All credit for the project goes to the original author** (TalkingSasquach / skizzophrenic): the
+Wi-Fi CSI sensing, the radar scope, the raycaster view, the UI and everything else. This fork only
+changes the external display driver. For what the device does and how it works, read the
+[original README](https://github.com/skizzophrenic/Cardputer-CSI-Human-Detector#readme).
+Licensed MIT, same as the original.
 
 ---
 
-## Hardware
+## Changes from the original
 
-| Board | Role |
-|-------|------|
-| M5Stack Cardputer ADV (ESP32-S3 / StampS3) | Console UI + CSI sensor |
+| Area | Original | This fork |
+| --- | --- | --- |
+| External screen | 2.8" ILI9341 (240x320) | Waveshare 2inch LCD, ST7789V (240x320, IPS) |
+| Panel driver (`include/ext_panel.h`) | `Panel_ILI9341_Pork` with a custom init table, class `LGFX_ExtILI9341` | LovyanGFX `Panel_ST7789`, class `LGFX_ExtST7789`; colour inversion on (IPS), no offsets |
+| Rotation | `setRotation(7)` | `setRotation(EXT_ROTATION)`, default `1` (landscape 320x240, same as the built-in screen). Use `3` to turn the picture 180° |
+| Backlight | BL wired to 5V; EXT PANEL brightness dimmed by scaling every pixel of the frame | BL on **G4** with PWM; EXT PANEL brightness sets the real backlight. Pixel dimming kept as an option (`-DEXT_SOFT_DIM=1`) if BL is wired to 3V3 instead |
+| Pins | defined inline | same pins, now `EXT_TFT_*` macros (overridable with `-D` flags) |
+| CI | release workflow on `v*` tags | adds **Build firmware** workflow: builds on every push / PR / manual run and uploads the `.bin` as an artifact. Release asset renamed `cardputer-csi-st7789v-<tag>.bin` |
+| Docs | | this README; `CLAUDE.md` updated for the new panel |
 
-An external [ILI9341 TFT display](https://a.co/d/0bZbfTqO) is wired to the Cardputer ADV GPIO header for the radar scope screen.
-
----
-
-## Displays
-
-Both screens are running at the same time showing different things (not a clone, actual different content):
-
-- **Top, external ILI9341:** PPI-style radar scope. Rotating sweep with a phosphor trail. When motion crosses the threshold it paints contact blips; radius from RSSI, heat and size from motion intensity.
-- **Bottom, built-in screen:** WiFi IP, status pill, PRESENCE / CLEAR banner, scrolling motion graph, threshold value, and key hints.
+Unchanged: CSI sensing, UI, rendering (240x180 canvas zoomed to 320x240), SPI bus (SPI2_HOST shared
+with the SD card, 27 MHz), keyboard controls, settings, partitions, build environment.
 
 ---
 
-## Flash the pre-built binary (easiest)
+## Wiring (Cardputer ADV header → Waveshare 2inch module)
 
-Don't want to deal with PlatformIO? Grab the latest `.bin` from the [Releases page](../../releases) and flash it in your browser using [ESP Web Flasher](https://esptool.spacehuhn.com/):
-
-1. Plug in your Cardputer ADV via USB-C
-2. Go to [esptool.spacehuhn.com](https://esptool.spacehuhn.com/)
-3. Click **Connect** and select your device
-4. Upload the `.bin` from the latest release at address `0x0`
-5. Done
-
-On first boot it'll scan for networks, let you pick one, and ask for the password. Credentials get saved to the device so it won't ask again.
+| Waveshare pin | Cardputer ADV | Notes |
+| --- | --- | --- |
+| DIN (MOSI) | G14 | shared with the SD card |
+| CLK (SCK) | G40 | shared with the SD card |
+| CS | G5 | |
+| DC | G6 | |
+| RST | G3 | |
+| BL | G4 | backlight, software-controlled |
+| VCC | 3V3 | set the module's voltage selector to 3.3V |
+| GND | GND | |
 
 ---
 
-## Build from source
+## Flash
 
-Requires [PlatformIO](https://platformio.org/).
+**Pre-built binary:** open the **Actions** tab → latest **Build firmware** run → download the
+`cardputer-csi-st7789v` artifact (or take the `.bin` from a [release](../../releases)). Flash
+`cardputer-csi-st7789v.bin` at address `0x0` with [ESP Web Flasher](https://esptool.spacehuhn.com/).
+
+**From source** ([PlatformIO](https://platformio.org/)):
 
 ```sh
 pio run -e cardputer-radar-csi -t upload
 ```
 
+On first boot it scans for networks and asks for the password, as in the original.
+
 ---
 
-## Keyboard controls
+## Keyboard controls (unchanged)
 
 | Key | Action |
 |-----|--------|
 | `c` | Trigger calibration (empty-room baseline) |
 | `,` | Decrease detection threshold |
 | `/` | Increase detection threshold |
-| `` ` `` | Open settings menu |
+| `` ` `` | Open settings menu (EXT PANEL = external backlight) |
 
 ---
 
-## Project structure
+## Troubleshooting
 
-```
-├── platformio.ini          Build config
-├── partitions.csv          8MB dual-OTA partition table
-├── include/
-│   ├── radar_link.h        Protocol parser, state, 240-sample motion history
-│   └── ext_panel.h         External ILI9341 panel driver
-└── src/main.cpp            Dual-screen radar UI, CSI callbacks, key handling
-```
+- **Picture upside down:** build with `-DEXT_ROTATION=3` (add it to `build_flags` in `platformio.ini`).
+- **Colours inverted (black looks white):** set `cfg.invert = false` in `include/ext_panel.h`.
+- **Red and blue swapped:** set `cfg.rgb_order = true` in `include/ext_panel.h`.
+- **Screen stays dark:** check BL on G4; or wire BL to 3V3 and build with `-DEXT_SOFT_DIM=1`.
 
----
-
-## Dev notes
-
-- `ARDUINO_USB_CDC_ON_BOOT=1`: `Serial` is the USB-C port.
-- Platform: `espressif32@6.12.0`, board `m5stack-stamps3`, Arduino framework.
-
----
-
-## Roadmap
-
-1. Calibration wizard with on-screen progress indicator
-2. Dual-antenna bearing estimation toward directional blips on the radar scope
-3. Presence event log with optional SD card persistence
-
----
-
-## The terrifying part
-
-There's almost nothing you can do to protect yourself from this. Wi-Fi goes through walls, floors, and pretty much anything else, because that's the whole point of Wi-Fi. This technology holds a ton of promise for things like elderly fall detection and hospital monitoring, but the privacy implications are real.
-
-I built this to show that you don't need a $60 billion government contract. You just need $50 and a little bit of tinkering time to build something that does what seemingly should be impossible.
-
-Are we okay with this? Drop a comment on the video and let me know.
+ST7789V settings follow the working Cardputer + Waveshare 2inch setup in
+[dbgoodPQ/LauncherDual](https://github.com/dbgoodPQ/LauncherDual).

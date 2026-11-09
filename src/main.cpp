@@ -60,7 +60,24 @@ static float      gCsiVarMax   = 0.001f;
 static float      gCsiVarMin   = 0.0f;
 static float      gCsiPhaVarMax = 0.001f;
 static float      gCsiPhaVarMin = 0.0f;
-static const float kCsiThresh  = 0.15f;
+static const float kCsiThresh  = 0.15f;   // default detection threshold (now adjustable with , and /)
+
+// ── Empty-room calibration (key c) ────────────────────────────────────────────
+// Records the empty room's CSI variance (mean + spread) and then measures motion
+// against that fixed baseline instead of the self-adjusting floor/max. Key x
+// drops the baseline and returns to the original auto-normalised mode.
+static volatile float gCsiVar     = 0.0f;   // latest raw amplitude variance
+static volatile float gCsiPVar    = 0.0f;   // latest raw phase variance
+static volatile bool  gCalibrated = false;
+static volatile float gCalAmpRef  = 0.0f;   // baseline noise ceiling (mean + 3*std)
+static volatile float gCalPhaRef  = 0.0f;
+static const uint32_t kCalLeadMs  = 3000;   // time to step out of the room
+static const uint32_t kCalMeasMs  = 10000;  // empty-room measurement
+static const float    kCalSpan    = 4.0f;   // motion = 1.0 at (1+span) x noise ceiling
+static uint8_t  gCalPhase  = 0;             // 0 idle, 1 lead-in, 2 measuring
+static uint32_t gCalT0     = 0;
+static uint32_t gCalFailMs = 0;             // shows "CAL FAILED" briefly
+static uint32_t gCalOkMs   = 0;             // shows "CALIBRATED" briefly
 
 static void IRAM_ATTR promiscuousRxCb(void*, wifi_promiscuous_pkt_type_t) {}
 
@@ -127,6 +144,17 @@ static void IRAM_ATTR csiCallback(void*, wifi_csi_info_t* info) {
     if (phaMotion < 0.0f) phaMotion = 0.0f;
     if (phaMotion > 1.0f) phaMotion = 1.0f;
 
+    gCsiVar  = var;
+    gCsiPVar = pvar;
+    if (gCalibrated) {
+        // Against the empty-room baseline: 0 at/below the noise ceiling,
+        // 1.0 at (1 + kCalSpan) times it.
+        ampMotion = (var  / gCalAmpRef - 1.0f) / kCalSpan;
+        phaMotion = (pvar / gCalPhaRef - 1.0f) / kCalSpan;
+        ampMotion = ampMotion < 0.0f ? 0.0f : (ampMotion > 1.0f ? 1.0f : ampMotion);
+        phaMotion = phaMotion < 0.0f ? 0.0f : (phaMotion > 1.0f ? 1.0f : phaMotion);
+    }
+
     // Blend: 60% amplitude, 40% phase (ruview weights: 40%/30%/30%)
     gCsiMotion = 0.6f * ampMotion + 0.4f * phaMotion;
     gCsiRssi   = info->rx_ctrl.rssi;
@@ -139,7 +167,11 @@ static M5Canvas        canvas(&M5Cardputer.Display);   // bottom (built-in) buff
 static LGFX_ExtST7789  extPanel;                       // external Waveshare 2" ST7789V
 static M5Canvas        topCanvas(&extPanel);           // top render buffer (240x180)
 static bool            extReady   = false;
+#if defined(RADAR_CSI)
+static float           gThreshold = 0.15f;   // = kCsiThresh, the original fixed CSI threshold
+#else
 static float           gThreshold = 0.35f;
+#endif
 static const float     EXT_ZOOM   = 320.0f / 240.0f;   // 240x180 * 1.333 = 320x240, fills panel
 
 // ── Color palettes & runtime settings ─────────────────────────────────────────
@@ -206,6 +238,7 @@ static void saveSettings() {
     prefs.putUChar("palette",   gColorIdx);
     prefs.putUChar("bright",    gBright);
     prefs.putUChar("extbright", gExtBright);
+    prefs.putUChar("thresh",    (uint8_t)lroundf(gThreshold * 100));
     prefs.end();
 }
 
@@ -215,7 +248,9 @@ static void loadSettings() {
     gColorIdx  = prefs.getUChar("palette",   0);
     gBright    = prefs.getUChar("bright",   80);
     gExtBright = prefs.getUChar("extbright",80);
+    uint8_t thr = prefs.getUChar("thresh", (uint8_t)lroundf(gThreshold * 100));
     prefs.end();
+    if (thr >= 5 && thr <= 95) gThreshold = thr / 100.0f;
     if (gColorIdx >= kNumPalettes) gColorIdx = 0;
     if (gBright    < 10 || gBright    > 100) gBright    = 80;
     if (gExtBright < 10 || gExtBright > 100) gExtBright = 80;
@@ -574,6 +609,42 @@ static void initCsi() {
     Serial.println("# CSI active");
 }
 
+static double   gCalSumA = 0, gCalSqA = 0, gCalSumP = 0, gCalSqP = 0;
+static uint32_t gCalN = 0, gCalCsi0 = 0;
+
+static void startCsiCal() {
+    if (gCalPhase) { gCalPhase = 0; return; }          // c again = cancel
+    if (!wifiReady) { gCalFailMs = millis(); return; } // no WiFi -> no CSI
+    gCalPhase = 1; gCalT0 = millis(); gCalFailMs = gCalOkMs = 0;
+}
+
+// Runs at 15 Hz from serviceCsi(). Returns true while calibration is in progress.
+static bool stepCsiCal(uint32_t now) {
+    if (gCalPhase == 1) {
+        if (now - gCalT0 < kCalLeadMs) return true;
+        gCalPhase = 2; gCalT0 = now; gCalN = 0; gCalCsi0 = gCsiCount;
+        gCalSumA = gCalSqA = gCalSumP = gCalSqP = 0;
+        return true;
+    }
+    if (gCalPhase != 2) return false;
+    const double a = gCsiVar, p = gCsiPVar;
+    gCalSumA += a; gCalSqA += a * a; gCalSumP += p; gCalSqP += p * p; gCalN++;
+    if (now - gCalT0 < kCalMeasMs) return true;
+
+    gCalPhase = 0;
+    if (gCalN < 30 || gCsiCount - gCalCsi0 < 50) { gCalFailMs = now; return false; }  // too little traffic
+    const double mA = gCalSumA / gCalN, mP = gCalSumP / gCalN;
+    const double sA = sqrt(fmax(0.0, gCalSqA / gCalN - mA * mA));
+    const double sP = sqrt(fmax(0.0, gCalSqP / gCalN - mP * mP));
+    gCalAmpRef  = (float)fmax(mA + 3.0 * sA, 1e-4);
+    gCalPhaRef  = (float)fmax(mP + 3.0 * sP, 1e-7);
+    gCalibrated = true;
+    gCalOkMs    = now;
+    Serial.printf("# CAL done: n=%lu ampRef=%.5f phaRef=%.7f\n",
+                  (unsigned long)gCalN, gCalAmpRef, gCalPhaRef);
+    return false;
+}
+
 static void serviceCsi() {
     static uint32_t seq        = 0;
     static uint32_t last       = 0;
@@ -594,6 +665,7 @@ static void serviceCsi() {
             esp_wifi_set_csi(false);
             esp_wifi_set_promiscuous(false);
             gCsiMotion = 0.0f;
+            if (gCalPhase) { gCalPhase = 0; gCalFailMs = millis(); }  // calibration needs CSI
         }
         return;  // no frames injected → radar goes stale → NO LINK shown
     }
@@ -602,9 +674,19 @@ static void serviceCsi() {
     // Once motion is detected, presence coasts for ~10 s so a still person stays
     // on the scope. Motion decays from its peak toward 10% so the blip fades
     // gracefully rather than snapping off.
+    if (stepCsiCal(now)) {
+        // No contacts while learning the empty room.
+        holdCnt = 0; heldMotion = 0.0f;
+        char cl[48];
+        snprintf(cl, sizeof(cl), "R,%lu,0,%.3f,%d,CAL",
+                 (unsigned long)(++seq), (float)gCsiMotion, (int)gCsiRssi);
+        radar.injectLine(cl);
+        return;
+    }
+
     float m = gCsiMotion;
     bool present;
-    if (m > kCsiThresh) {
+    if (m > gThreshold) {
         holdCnt    = kHold;
         heldMotion = m;
         present    = true;
@@ -619,8 +701,9 @@ static void serviceCsi() {
     }
 
     char line[48];
-    snprintf(line, sizeof(line), "R,%lu,%d,%.3f,%d,RUN",
-             (unsigned long)(++seq), (int)present, m, (int)gCsiRssi);
+    snprintf(line, sizeof(line), "R,%lu,%d,%.3f,%d,%s",
+             (unsigned long)(++seq), (int)present, m, (int)gCsiRssi,
+             gCalibrated ? "RUN" : "AUTO");
     radar.injectLine(line);
 }
 #endif
@@ -772,6 +855,23 @@ static void drawBottom() {
   canvas.drawRoundRect(4, 17, W - 8, 34, 4, border);
   canvas.setTextSize(2);
   const char* lbl = present ? ">> CONTACT <<" : "~~ CLEAR ~~";
+#if defined(RADAR_CSI)
+  char calLbl[20];
+  const uint32_t nowMs = millis();
+  if (gCalPhase == 1) {
+    snprintf(calLbl, sizeof(calLbl), "LEAVE ROOM %lu",
+             (unsigned long)((kCalLeadMs - (nowMs - gCalT0) + 999) / 1000));
+    lbl = calLbl;
+  } else if (gCalPhase == 2) {
+    uint32_t el = nowMs - gCalT0; if (el > kCalMeasMs) el = kCalMeasMs;
+    snprintf(calLbl, sizeof(calLbl), "CALIBRATE %lu", (unsigned long)((kCalMeasMs - el + 999) / 1000));
+    lbl = calLbl;
+  } else if (gCalFailMs && nowMs - gCalFailMs < 3000) {
+    lbl = "CAL FAILED";
+  } else if (gCalOkMs && nowMs - gCalOkMs < 2000) {
+    lbl = "CALIBRATED";
+  }
+#endif
   canvas.setTextColor(present ? canvas.color565(255, 100, 255) : cCyan, bg);
   canvas.drawString(lbl, (W - canvas.textWidth(lbl)) / 2, 25);
 
@@ -1676,17 +1776,24 @@ static void serviceKeys() {
     } else {
       if      (c == '`')             { gMenuOpen = true; gMenuCursor = 0; }
       else if (c == '.')             gViewMode = (gViewMode + 1) % 2;
+#if defined(RADAR_CSI)
+      else if (c == 'c' || c == 'C') startCsiCal();
+      else if (c == 'x' || c == 'X') { gCalPhase = 0; gCalibrated = false; }   // back to auto mode
+#else
       else if (c == 'c' || c == 'C') radar.calibrate();
+#endif
       else if (c == ',') {
         gThreshold -= 0.05f; if (gThreshold < 0.05f) gThreshold = 0.05f;
 #if !RADAR_FAKE
         radar.setThreshold(gThreshold);
 #endif
+        saveSettings();
       } else if (c == '/') {
         gThreshold += 0.05f; if (gThreshold > 0.95f) gThreshold = 0.95f;
 #if !RADAR_FAKE
         radar.setThreshold(gThreshold);
 #endif
+        saveSettings();
       }
     }
   }

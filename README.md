@@ -40,6 +40,33 @@ with the SD card, 27 MHz), keyboard controls, settings, partitions, build enviro
 
 ---
 
+## Screens
+
+> Previews rendered from the screen designs, with example data. On the device the text uses the
+> Cardputer's pixel font, so spacing differs slightly.
+
+**External screen** (ST7789V, 320x240) — `.` switches views:
+
+| Range cone (`n` picks the zone, `r` the scale) | Zones (Cardputer + every sensor node) |
+| --- | --- |
+| <img src="docs/screens/cone.png" width="320" alt="Range cone showing motion 42% in the KITCHEN zone"> | <img src="docs/screens/zones.png" width="320" alt="Zones view: ME clear, KITCHEN motion 34%, HALLWAY clear, BEDROOM offline"> |
+
+**Cardputer screen** (240x135):
+
+| Normal use, with sensor nodes | Settings (`` ` ``) |
+| --- | --- |
+| <img src="docs/screens/bottom.png" width="320" alt="Cardputer screen: KITCHEN banner, zone chips, motion graph"> | <img src="docs/screens/settings.png" width="320" alt="Settings menu with the NODES entry"> |
+
+**Sensor nodes** (settings → NODES):
+
+| Node list | One node |
+| --- | --- |
+| <img src="docs/screens/nodes.png" width="320" alt="NODES list with three nodes and ADD NODE"> | <img src="docs/screens/node-edit.png" width="320" alt="KITCHEN node: rename, blink LED, remove"> |
+| **Add node: name it** | **Add node: paired** |
+| <img src="docs/screens/add-node.png" width="320" alt="Add node: found NODE A1B2, name KITCHEN"> | <img src="docs/screens/paired.png" width="320" alt="KITCHEN joined the Wi-Fi and is online"> |
+
+---
+
 ## Wiring (Cardputer ADV header → Waveshare 2inch module)
 
 | Waveshare pin | Cardputer ADV | Notes |

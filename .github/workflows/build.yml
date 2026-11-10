@@ -19,7 +19,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: pio-${{ hashFiles('platformio.ini') }}
+          key: pio-${{ hashFiles('platformio.ini', 'tools/node_esp32/platformio.ini') }}
 
       - name: Install PlatformIO
         run: pip install platformio esptool
@@ -36,11 +36,32 @@ jobs:
             0x8000 .pio/build/cardputer-radar-csi/partitions.bin \
             0x10000 .pio/build/cardputer-radar-csi/firmware.bin
 
-      - name: Upload artifact
+      - name: Build sensor node firmware (ESP32-WROOM-32 / 32D)
+        run: pio run -d tools/node_esp32 -e esp32-node
+
+      - name: Merge node binaries (flash at 0x0)
+        run: |
+          B=tools/node_esp32/.pio/build/esp32-node
+          python -m esptool --chip esp32 merge_bin \
+            -o csi-node-esp32.bin \
+            --flash_mode dio --flash_size 4MB \
+            0x1000 $B/bootloader.bin \
+            0x8000 $B/partitions.bin \
+            0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
+            0x10000 $B/firmware.bin
+
+      - name: Upload Cardputer artifact
         uses: actions/upload-artifact@v4
         with:
           name: cardputer-csi-st7789v
           path: |
             cardputer-csi-st7789v.bin
             .pio/build/cardputer-radar-csi/firmware.bin
+          if-no-files-found: error
+
+      - name: Upload node artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: csi-node-esp32
+          path: csi-node-esp32.bin
           if-no-files-found: error

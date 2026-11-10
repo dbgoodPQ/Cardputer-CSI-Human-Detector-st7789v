@@ -862,6 +862,10 @@ static void serviceCsi() {
 }
 #endif
 
+#if defined(RADAR_CSI)
+#include "zones_core.h"      // sensor nodes: storage, UDP reports, pairing, zone helpers
+#endif
+
 // --------------------------------------------------------------------------
 // In-app settings menu (ESC to open/close)
 // --------------------------------------------------------------------------
@@ -883,6 +887,9 @@ static void menuAdjust(int dir) {
         case 3:
             gMenuOpen = false;
             runWifiPicker();
+            break;
+        case 4:
+            runNodesMenu();
             break;
 #endif
         default: break;
@@ -908,8 +915,8 @@ static void drawMenu() {
 
     // menu rows
 #if defined(RADAR_CSI)
-    const char* const labels[] = { "PALETTE", "SCREEN", "EXT PANEL", "WIFI NET" };
-    const int numItems = 4, rowH = 20, textOff = 6;
+    const char* const labels[] = { "PALETTE", "SCREEN", "EXT PANEL", "WIFI NET", "NODES" };
+    const int numItems = 5, rowH = 20, textOff = 6;
 #else
     const char* const labels[] = { "PALETTE", "SCREEN", "EXT PANEL" };
     const int numItems = 3, rowH = 24, textOff = 8;
@@ -936,6 +943,7 @@ static void drawMenu() {
                 else strncpy(val, "> SCAN", sizeof(val));
                 break;
             }
+            case 4: snprintf(val, sizeof(val), "%d >", gNodeCount); break;
 #endif
             default: val[0] = '\0'; break;
         }
@@ -949,7 +957,11 @@ static void drawMenu() {
     canvas.fillRect(0, H - 14, W, 14, cBar);
     canvas.drawFastHLine(0, H - 14, W, gColA);
     canvas.setTextColor(cDim, cBar);
+#if defined(RADAR_CSI)
+    const char* hint = ";/.:nav  ,//:change  enter:open  `:save";
+#else
     const char* hint = ";/.:nav  ,//:change  `:save";
+#endif
     canvas.drawString(hint, (W - canvas.textWidth(hint)) / 2, H - 11);
 
     canvas.pushSprite(0, 0);
@@ -964,7 +976,17 @@ static void drawBottom() {
   const int H = canvas.height();
   const bool linkOk  = !radar.stale(750);
   const bool calib   = (strcmp(s.mode, "CAL") == 0);
+#if defined(RADAR_CSI)
+  // With sensor nodes: banner, chips and graph cover every zone (ME + nodes).
+  const uint32_t zNow     = millis();
+  const bool     zoneMode = gNodeCount > 0;
+  float          zMax     = 0.0f;
+  int            zMaxIdx  = 0;
+  const int      zAct     = zoneMode ? activeZone(zNow, &zMax, &zMaxIdx) : -1;
+  const bool present = zoneMode ? (zAct >= 0) : (linkOk && s.presence);
+#else
   const bool present = linkOk && s.presence;
+#endif
 
   const uint16_t cMag    = gColA;
   const uint16_t cCyan   = gColB;
@@ -1013,6 +1035,11 @@ static void drawBottom() {
   canvas.setTextSize(2);
   const char* lbl = present ? ">> CONTACT <<" : "~~ CLEAR ~~";
 #if defined(RADAR_CSI)
+  char zoneLbl[24];
+  if (zoneMode && zAct >= 0) {
+    snprintf(zoneLbl, sizeof(zoneLbl), ">> %s <<", getZone(zAct, zNow).name);
+    lbl = zoneLbl;
+  }
   char calLbl[20];
   const uint32_t nowMs = millis();
   if (gImuMoving) {
@@ -1038,17 +1065,30 @@ static void drawBottom() {
 
   // motion graph
   canvas.setTextSize(1);
+#if defined(RADAR_CSI)
+  if (zoneMode) drawZoneChips(54, zNow);
+  const int gx = 4, gy = zoneMode ? 69 : 54, gw = W - 8, gh = zoneMode ? 35 : 50;
+#else
   const int gx = 4, gy = 54, gw = W - 8, gh = 50;
+#endif
   canvas.drawRect(gx, gy, gw, gh, cBorder);
   int ty = gy + gh - 1 - (int)(gThreshold * (gh - 2));
   canvas.drawFastHLine(gx + 1, ty, gw - 2, canvas.color565(180, 0, 180));
 
   int cols = gw - 2;
+#if defined(RADAR_CSI)
+  int n    = zoneMode ? kZoneHist : RadarLink::historySize();
+#else
   int n    = RadarLink::historySize();
+#endif
   if (cols > n) cols = n;
   int xoff = (gw - 2) - cols;
   for (int i = 0; i < cols; ++i) {
+#if defined(RADAR_CSI)
+    float v = zoneMode ? zoneHistAt(n - cols + i) : radar.historyAt(n - cols + i);
+#else
     float v = radar.historyAt(n - cols + i);
+#endif
     int barh = (int)(v * (gh - 2));
     if (barh < 0) barh = 0;
     if (barh > gh - 2) barh = gh - 2;
@@ -1062,8 +1102,12 @@ static void drawBottom() {
   // footer
   char foot[48];
 #if defined(RADAR_CSI)
-  snprintf(foot, sizeof(foot), "mot %3d%%  %ddBm  thr %2d%%  %u/s",
-           (int)(s.motion * 100), s.rssi, (int)(gThreshold * 100), (unsigned)gPktRate);
+  if (zoneMode)
+    snprintf(foot, sizeof(foot), "mot %3d%% %-10s thr %2d%%",
+             (int)(zMax * 100), getZone(zMaxIdx, zNow).name, (int)(gThreshold * 100));
+  else
+    snprintf(foot, sizeof(foot), "mot %3d%%  %ddBm  thr %2d%%  %u/s",
+             (int)(s.motion * 100), s.rssi, (int)(gThreshold * 100), (unsigned)gPktRate);
 #else
   snprintf(foot, sizeof(foot), "mot %3d%%  rssi %ddBm  thr %2d%%",
            (int)(s.motion * 100), s.rssi, (int)(gThreshold * 100));
@@ -1098,7 +1142,7 @@ struct Ripple { float ang; float rad; uint32_t birth; bool active; };
 static Ripple         ripples[6];
 static float          gBEAR = 0.0f;
 static float          gLastBrg  = 0.0f;
-static int            gViewMode = 0;   // 0 = range cone, 1 = 3-D raycaster
+static int            gViewMode = 0;   // 0 = range cone, 1 = zones (CSI build) / 3-D raycaster, 2 = 3-D raycaster
 
 // Returns an angle in [0, TAU) that avoids ±30° around 6 o'clock (π/2) and 12 o'clock (3π/2).
 // Blips spawned at these angles overlap the central ghost avatar in the raycaster view.
@@ -1804,14 +1848,21 @@ static void drawTop() {
 }
 
 // --------------------------------------------------------------------------
+#if defined(RADAR_CSI)
+#include "zones_ui.h"        // ZONES view + NODES menu
+#endif
+
 static void serviceKeys() {
   if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return;
   auto st = M5Cardputer.Keyboard.keysState();
+#if defined(RADAR_CSI)
+  if (gMenuOpen && st.enter && gMenuCursor == 4) { runNodesMenu(); return; }
+#endif
   for (char c : st.word) {
     if (gMenuOpen) {
 #if defined(RADAR_CSI)
-      if      (c == ';') gMenuCursor = (gMenuCursor + 3) % 4;
-      else if (c == '.') gMenuCursor = (gMenuCursor + 1) % 4;
+      if      (c == ';') gMenuCursor = (gMenuCursor + 4) % 5;
+      else if (c == '.') gMenuCursor = (gMenuCursor + 1) % 5;
 #else
       if      (c == ';') gMenuCursor = (gMenuCursor + 2) % 3;
       else if (c == '.') gMenuCursor = (gMenuCursor + 1) % 3;
@@ -1824,11 +1875,19 @@ static void serviceKeys() {
       }
     } else {
       if      (c == '`')             { gMenuOpen = true; gMenuCursor = 0; }
+#if defined(RADAR_CSI)
+      else if (c == '.')             gViewMode = (gViewMode + 1) % 3;   // cone, zones, 3D
+#else
       else if (c == '.')             gViewMode = (gViewMode + 1) % 2;
+#endif
       else if (c == 'r' || c == 'R') { gRange10 = !gRange10; saveSettings(); }
 #if defined(RADAR_CSI)
-      else if (c == 'c' || c == 'C') startCsiCal();
-      else if (c == 'x' || c == 'X') { gCalPhase = 0; gCalibrated = false; }   // back to auto mode
+      else if (c == 'c' || c == 'C') {
+        const bool cancel = gCalPhase != 0;
+        startCsiCal();
+        sendNodeCmd(cancel ? "C,CALSTOP" : "C,CAL");                         // all zones together
+      }
+      else if (c == 'x' || c == 'X') { gCalPhase = 0; gCalibrated = false; sendNodeCmd("C,UNCAL"); }
 #else
       else if (c == 'c' || c == 'C') radar.calibrate();
 #endif
@@ -1837,11 +1896,17 @@ static void serviceKeys() {
 #if !RADAR_FAKE
         radar.setThreshold(gThreshold);
 #endif
+#if defined(RADAR_CSI)
+        sendNodeThreshold();
+#endif
         saveSettings();
       } else if (c == '/') {
         gThreshold += 0.05f; if (gThreshold > 0.95f) gThreshold = 0.95f;
 #if !RADAR_FAKE
         radar.setThreshold(gThreshold);
+#endif
+#if defined(RADAR_CSI)
+        sendNodeThreshold();
 #endif
         saveSettings();
       }
@@ -1880,6 +1945,7 @@ void setup() {
 
 #if defined(RADAR_CSI)
   initImu();
+  loadNodes();
   initCsi();
 #elif defined(RADAR_UDP)
   initWiFi();
@@ -1898,6 +1964,7 @@ void loop() {
 #elif defined(RADAR_CSI)
   serviceCsi();
   serviceCam();
+  serviceNodes();
 #elif defined(RADAR_UDP)
   serviceUDP();
 #else
@@ -1911,6 +1978,10 @@ void loop() {
   if (now - lastBot >= 33) { lastBot = now; if (gMenuOpen) drawMenu(); else drawBottom(); }
   if (extReady && now - lastTop >= 125) {
     lastTop = now;
+#if defined(RADAR_CSI)
+    drawExternalView();
+#else
     if (gViewMode == 0) drawTop(); else drawRaycaster();
+#endif
   }
 }

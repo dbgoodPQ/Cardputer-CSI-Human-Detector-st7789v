@@ -280,7 +280,7 @@ static void startSensing() {
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_promiscuous_rx_cb(promiscuousRxCb);
     wifi_promiscuous_filter_t pf{};
-    pf.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;   // CSI only needs the radio in this mode
+    pf.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;   // same as the Cardputer
     esp_wifi_set_promiscuous_filter(&pf);
     wifi_csi_config_t cfg = {};
     cfg.lltf_en = true; cfg.htltf_en = true; cfg.stbc_htltf2_en = true;

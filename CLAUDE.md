@@ -21,8 +21,10 @@ Information (CSI). Realistic target: on-device **presence + motion**.
     every 1 m to 5 m or every 2 m to 10 m (`gRange10`, key r, saved in prefs).
     CSI has no distance, so motion = whole-cone glow + `MOTION xx%`; no dots.
     LD2410 later: dots on the centre line at the measured distance (moving =
-    magenta, still = cyan) with a dashed band across the cone. `.` toggles the
-    3D raycaster view (unchanged, still has its own illustrative blips).
+    magenta, still = cyan) with a dashed band across the cone. `.` cycles
+    cone → ZONES → 3D raycaster (unchanged, still has its own illustrative blips).
+  - ZONES view (`drawZones()`, include/zones_ui.h): one row per zone, zone 0 = "ME"
+    (the Cardputer), then paired nodes. Adaptive row height for up to 7 zones.
   - Bottom = built-in 1.14" (240x135): WiFi IP, status pill, PRESENCE/CLEAR
     banner, scrolling motion graph, threshold + key hints.
 - **No router needed (UART/UDP builds only):** S3 is the AP; Cardputer connects
@@ -40,6 +42,27 @@ Information (CSI). Realistic target: on-device **presence + motion**.
   |accel - gravity| > 0.05 g => MOVED, CSI window flushed, floor frozen, until
   2 s still. Tilt > 5 deg or > 1.5 s of movement = relocation => calibration
   dropped (user must press c; no auto-recal, the user is usually in the room).
+
+## Sensor nodes (ESP32-WROOM-32/32D, `tools/node_esp32`)
+- One generic firmware; no names/creds built in. Protocol + pairing crypto in
+  `include/node_proto.h` (shared by both builds; node build uses `-I../../include`).
+- Pairing: node in setup mode hops ch 1-13 sending ESP-NOW HELLO; Cardputer
+  (` > NODES > ADD NODE, CSI paused, PS_NONE) answers SEEN → node locks channel;
+  Enter sends PAIR = SSID+psk AES-128-GCM (fixed key `NODE_PAIR_KEY`, AAD = node
+  MAC + Cardputer MAC); node saves, PAIR_OK, reboots into run mode.
+- Run: node = same CSI pipeline as Cardputer (router BSSID, 50 Hz ping, shape
+  variance, calibration, 10 s hold), broadcasts `N,<mac>,<seq>,<pres>,<motion>,
+  <rssi>,<rate>,<mode>` on UDP 4211 at 10 Hz. Cardputer → nodes UDP 4212:
+  `C,CAL|CALSTOP|UNCAL|THR,<f>|BLINK,<mac>|FORGET,<mac>` (THR resent every 5 s).
+- Cardputer side: `include/zones_core.h` (storage prefs "nodes", UDP, zones,
+  ESP-NOW plumbing, bottom chips) and `include/zones_ui.h` (ZONES view, NODES
+  menu: list / node RENAME-BLINK-REMOVE / add-node flow). Names live on the
+  Cardputer only (max 6 nodes, 10 chars). Node offline after 10 s silence.
+- Node: BOOT 5 s = forget creds; fresh pairing + no Wi-Fi in 60 s = forget;
+  LED (GPIO2) slow blink = setup, on = motion, fast = BLINK.
+- Design mockups: claude.ai Design canvas "Sensor Nodes Screens".
+- CI builds `csi-node-esp32.bin` (merged: 0x1000 bootloader, 0x8000 partitions,
+  0xe000 boot_app0, 0x10000 app; flash at 0x0).
 
 ## Wire protocol (UDP port 4210, newline-terminated ASCII, ~15 Hz)
 - S3 → Cardputer: `R,<seq>,<presence 0|1>,<motion 0.000-1.000>,<rssi>,<mode>`
@@ -76,6 +99,8 @@ Information (CSI). Realistic target: on-device **presence + motion**.
   `drawRaycaster()` (vaporwave 3D mode), `serviceKeys()`, fake generator.
   Bottom @30 fps, top @~8 fps.
 - `include/ext_panel.h` — external ST7789V panel class (`LGFX_ExtST7789`).
+- `include/node_proto.h`, `include/zones_core.h`, `include/zones_ui.h` — sensor
+  nodes (see above). `tools/node_esp32/` — node firmware (PlatformIO, esp32dev).
 - `tools/sensor_s3/` — S3 CSI sensor firmware (AP mode, UDP broadcast).
 - `tools/fake_c5/fake_c5.ino` — spare-S3 UART protocol emitter.
 
@@ -93,14 +118,17 @@ M5GFX 0.3.0's board detection probes G5/G6 (= external CS/DC) and misdetects
 the ADV (rotated internal screen, dead external screen). Don't unpin without
 re-testing on hardware.
 ✅ IMU device-motion guard (pauses sensing while the Cardputer moves).
+🧪 Sensor nodes + ZONES view: implemented and building in CI, NOT yet tested on
+hardware (pairing timing, UDP broadcast on the user's network, node CSI on
+classic ESP32). User has 3 WROOM-32/32D boards, one per room (option B).
 ⚠️ Tuning constants are first estimates, not yet tuned on real data:
 `kCsiSpan`=4, `kAutoMargin`=2, `kCsiWin`=25, hold `kHold`=150 (10 s),
 default threshold 0.15, IMU thresholds 6 dps / 0.05 g / 2 s settle.
 ℹ️ Range cone replaced the PPI radar circle (user request; mockup on a claude.ai
 Design canvas "Range Cone Screen"). 3D view blips remain illustrative. Spycam icons = OUI match on sniffed MACs (many false
 positives: ESP32, Amazon, Realtek are generic).
-ℹ️ The UART/UDP builds (`cardputer-radar`, `cardputer-radar-wifi`) and
-`tools/sensor_s3` are inherited from the original and untouched by this fork.
+ℹ️ The UART/UDP builds (`cardputer-radar`, `cardputer-radar-wifi`) are inherited
+from the original and untouched by this fork (`tools/sensor_s3` is not in this repo).
 
 ## Next steps (priority order)
 1. **Tune on real data:** log `gCsiMetric`, ref and motion over Serial while
@@ -114,8 +142,10 @@ positives: ESP32, Amazon, Realtek are generic).
    micro-motion) + distance gates; fuse with CSI (contact if either is
    confident, distance from the radar). Draw its moving/still targets as dots
    in the range cone (design already agreed with the user). Grove can do UART *or* I2C, not both.
-6. **Presence event log** on the bottom screen with optional SD persistence.
-7. **Port sensing to ESP32-C5** (MonsterC5) later: different
+6. **Per-node calibration** from the node menu (calibrate one room while you
+   are elsewhere); currently `c` calibrates all zones together.
+7. **Presence event log** on the bottom screen with optional SD persistence.
+8. **Port sensing to ESP32-C5** (MonsterC5) later: different
    `wifi_csi_acquire_config_t` (no `lltf_en`, `sig_mode`, ...).
 
 ## Hardware inventory (chip cheat-sheet)

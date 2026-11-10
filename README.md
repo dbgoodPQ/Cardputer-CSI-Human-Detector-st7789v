@@ -31,7 +31,8 @@ Licensed MIT, same as the original.
 | Status | | `NO CSI` (red) when no router frames arrive; router frames per second shown on the bottom screen footer; sensing restarts on its own after a Wi-Fi reconnect |
 | Calibration (`c`) | sent `CAL` to an external sensor board that the on-device CSI build doesn't have, so nothing happened | on-device empty-room calibration: 3 s to leave the room, 10 s measurement (countdown on the bottom screen), then motion is measured against that baseline. `x` returns to `AUTO`. Not saved across reboots: recalibrate after moving the device |
 | Threshold (`,` `/`) | changed the on-screen value only; detection used a fixed 0.15 | sets the real detection threshold (default 0.15, as before), saved across reboots |
-| CI | release workflow on `v*` tags | adds **Build firmware** workflow: builds on every push / PR / manual run and uploads the `.bin` as an artifact. Release asset renamed `cardputer-csi-st7789v-<tag>.bin` |
+| Sensor nodes | none | up to 6 ESP32-WROOM-32 / 32D boards as extra sensors, one per room (`tools/node_esp32`). Paired and named from the Cardputer's settings menu, no hardcoded names or Wi-Fi details. New **ZONES** view on the external screen; the Cardputer's own zone is called `ME`. See [Sensor nodes](#sensor-nodes) |
+| CI | release workflow on `v*` tags | adds **Build firmware** workflow: builds on every push / PR / manual run and uploads the `.bin` files as artifacts (Cardputer and sensor node). Release assets `cardputer-csi-st7789v-<tag>.bin` and `csi-node-esp32-<tag>.bin` |
 | Docs | | this README; `CLAUDE.md` updated for the new panel |
 
 Unchanged: UI, rendering (240x180 canvas zoomed to 320x240), SPI bus (SPI2_HOST shared
@@ -74,13 +75,13 @@ On first boot it scans for networks and asks for the password, as in the origina
 
 | Key | Action |
 |-----|--------|
-| `c` | Calibrate: leave the room within 3 s, keep the device still for 10 s. `c` again cancels |
-| `x` | Drop the calibration, back to `AUTO` |
+| `c` | Calibrate the Cardputer and every node: leave within 3 s, keep everything still for 10 s. `c` again cancels |
+| `x` | Drop the calibration (Cardputer and nodes), back to `AUTO` |
 | `r` | Range cone scale: 5 m (1 m lines) / 10 m (2 m lines) |
-| `.` | Switch the external screen between the range cone and the 3D view |
-| `,` | Decrease detection threshold (5% steps) |
-| `/` | Increase detection threshold (5% steps) |
-| `` ` `` | Open settings menu (EXT PANEL = external backlight) |
+| `.` | External screen view: range cone → zones → 3D view |
+| `,` | Decrease detection threshold (5% steps, applies to the nodes too) |
+| `/` | Increase detection threshold (5% steps, applies to the nodes too) |
+| `` ` `` | Open settings menu (EXT PANEL = external backlight, NODES = sensor nodes) |
 
 ---
 
@@ -103,9 +104,55 @@ on the scope for about 10 s after their last movement, then disappears. Through-
 - Moving the Cardputer to a new spot drops the calibration on purpose: recalibrate there.
   It doesn't recalibrate by itself, because you're usually still in the room right after moving it.
 - If you pick it up during calibration, the countdown restarts once it is still again.
-- Calibrate (`c`) once the device is in place. `CAL FAILED` means too few router frames or Wi-Fi dropped.
+- Calibrate (`c`) once everything is in place. `CAL FAILED` means too few router frames or Wi-Fi dropped.
 - After calibrating, an empty room should sit near 0% motion. If you get false contacts, raise the
   threshold with `/`; if you're missed, lower it with `,`.
+
+---
+
+## Sensor nodes
+
+ESP32-WROOM-32 / WROOM-32D boards can act as extra sensors, one per room (up to 6). Each node joins
+your Wi-Fi, pings the router and measures motion on its own link exactly like the Cardputer, then
+reports to the Cardputer about 10 times a second. The Cardputer shows every room as a **zone**.
+
+**Flash a node:** Actions tab → latest **Build firmware** run → `csi-node-esp32` artifact. Flash
+`csi-node-esp32.bin` at `0x0` with [ESP Web Flasher](https://esptool.spacehuhn.com/) (or
+`cd tools/node_esp32 && pio run -t upload`). Every node gets the same firmware.
+
+**Pair it:**
+1. Power the node near the Cardputer. A new node starts in setup mode (its LED blinks slowly, if the board has one).
+2. On the Cardputer: `` ` `` → **NODES** → **+ ADD NODE**. The board appears as `NODE xxxx`.
+3. Type a name (up to 10 letters, e.g. `KITCHEN`) and press Enter. The Cardputer sends it your Wi-Fi
+   details over the air (ESP-NOW, AES-encrypted); the node saves them, joins the Wi-Fi and shows up as
+   **ONLINE**. Several boards waiting at once: `tab` switches between them.
+4. Put it in its room and calibrate (`c`).
+
+**Manage nodes** (`` ` `` → **NODES**): live status of each node; open one to **RENAME** it,
+**BLINK LED** to find the board, or **REMOVE** it (an online node goes back to setup mode).
+Names are stored on the Cardputer only.
+
+**Reset a board:** hold its **BOOT** button for 5 seconds → it forgets the Wi-Fi and returns to setup
+mode. A freshly paired node that can't join the Wi-Fi within 60 s also returns to setup mode.
+
+**Where to put them:** people should walk **between a node and the router**. A node right next to the
+router sees little. Nodes need USB power (about 100–150 mA each).
+
+**On screen:**
+- External screen, **ZONES** view (`.`): one row per zone, `ME` first. Magenta = motion above the
+  threshold, `OFFLINE` when a node hasn't reported for 10 s.
+- Cardputer screen: the banner names the most active zone (`>> KITCHEN <<`), chips show every zone
+  (magenta = motion, outline = clear, grey = offline), the graph follows the strongest zone.
+- The node's LED lights while it detects motion (handy when placing it).
+
+**Calibration:** `c` calibrates all zones at the same time, so every watched room should be empty
+for those 13 seconds.
+
+**Security note:** the Wi-Fi password is sent once, only while you pair, encrypted with a key built
+into the firmware. Because this firmware is public, someone who knows it and records that exact
+moment nearby could decrypt it. To use your own key, build both firmwares with
+`-DNODE_PAIR_KEY=\"16-characters!!\"` (same value on both). Node commands (calibrate, blink, remove)
+are accepted from anyone on your local network.
 
 ---
 
@@ -116,6 +163,10 @@ on the scope for about 10 s after their last movement, then disappears. Through-
 - **Red and blue swapped:** set `cfg.rgb_order = true` in `include/ext_panel.h`.
 - **`NO CSI` all the time:** the router doesn't answer ping (some block ICMP from clients, or guest
   networks isolate clients). Try another network or enable ping replies on the router.
+- **Node never appears in ADD NODE:** check its LED blinks slowly (setup mode); otherwise hold BOOT
+  5 s. Keep it within a few metres of the Cardputer while pairing.
+- **Node paired but stays `WAITING`/`OFFLINE`:** it can't reach the Wi-Fi (2.4 GHz only) or your
+  network blocks broadcast between devices (guest networks / client isolation).
 - **Screen stays dark:** check BL on G4; or wire BL to 3V3 and build with `-DEXT_SOFT_DIM=1`.
 
 ST7789V settings follow the working Cardputer + Waveshare 2inch setup in

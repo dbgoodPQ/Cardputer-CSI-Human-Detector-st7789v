@@ -48,32 +48,50 @@ static char     wifiIP[16] = "---";
 static bool  wifiReady = false;
 static char  wifiIP[16] = "---";
 
-static const int  kCsiWindow  = 50;
-static float      gCsiAmpBuf[kCsiWindow];
-static float      gCsiPhaBuf[kCsiWindow];   // mean sin(phase) per frame
-static int        gCsiAmpIdx    = 0;
-static int        gCsiAmpFilled = 0;
-static volatile float    gCsiMotion  = 0.0f;
-static volatile int8_t   gCsiRssi    = -80;
-static volatile uint32_t gCsiCount   = 0;
-static float      gCsiVarMax   = 0.001f;
-static float      gCsiVarMin   = 0.0f;
-static float      gCsiPhaVarMax = 0.001f;
-static float      gCsiPhaVarMin = 0.0f;
-static const float kCsiThresh  = 0.15f;   // default detection threshold (now adjustable with , and /)
+#include "ping/ping_sock.h"
+#include "lwip/ip_addr.h"
+#include "freertos/queue.h"
+
+// Sensing pipeline (reworked in the ST7789V fork):
+//  1. The CSI callback keeps only frames transmitted by our own router (BSSID)
+//     and queues their L-LTF block (64 subcarriers, present in every frame type).
+//  2. A 50 Hz ICMP ping to the gateway guarantees a steady stream of router frames.
+//  3. Per frame: amplitude of the 52 data subcarriers divided by their mean. This
+//     "shape" cancels the receiver's automatic gain changes.
+//  4. Metric = mean over subcarriers of the shape's variance over the last kCsiWin
+//     frames: tiny when the room is still, large when someone moves in the link.
+//  5. Motion 0..1 = (metric / ref - 1) / kCsiSpan. ref = empty-room calibration
+//     (key c) or, before calibration, kAutoMargin x a slowly tracked quiet floor.
+struct CsiPkt { int8_t buf[128]; int8_t rssi; };
+static QueueHandle_t     gCsiQ     = nullptr;
+static uint8_t           gBssid[6] = {0};
+static volatile bool     gBssidOk  = false;
+static volatile uint32_t gCsiCount = 0;      // router frames accepted
+static esp_ping_handle_t gPing     = nullptr;
+
+static const int   kSub        = 52;         // data subcarriers in the L-LTF
+static const int   kCsiWin     = 25;         // ~0.5 s at 50 frames/s
+static float       gShape[kCsiWin][kSub];
+static int         gWinIdx     = 0;
+static int         gWinFill    = 0;
+static float       gCsiMetric  = 0.0f;       // latest windowed shape variance
+static float       gCsiMotion  = 0.0f;       // 0..1, smoothed
+static int8_t      gCsiRssi    = -80;        // router RSSI (smoothed)
+static float       gRssiEma    = -80.0f;
+static float       gFloor      = 0.0f;       // AUTO-mode quiet floor
+static uint32_t    gLastPktMs  = 0;
+static uint16_t    gPktRate    = 0;          // router frames per second
+static const float kCsiThresh  = 0.15f;      // default detection threshold (, and / adjust)
+static const float kCsiSpan    = 4.0f;       // motion = 1.0 at (1 + span) x ref
+static const float kAutoMargin = 2.0f;       // AUTO: noise ceiling = 2 x quiet floor
 
 // ── Empty-room calibration (key c) ────────────────────────────────────────────
-// Records the empty room's CSI variance (mean + spread) and then measures motion
-// against that fixed baseline instead of the self-adjusting floor/max. Key x
-// drops the baseline and returns to the original auto-normalised mode.
-static volatile float gCsiVar     = 0.0f;   // latest raw amplitude variance
-static volatile float gCsiPVar    = 0.0f;   // latest raw phase variance
+// Records the metric's mean + 3*std in the empty room; motion is then measured
+// against that fixed reference. Key x returns to AUTO.
 static volatile bool  gCalibrated = false;
-static volatile float gCalAmpRef  = 0.0f;   // baseline noise ceiling (mean + 3*std)
-static volatile float gCalPhaRef  = 0.0f;
+static float          gCalRef     = 0.0f;
 static const uint32_t kCalLeadMs  = 3000;   // time to step out of the room
 static const uint32_t kCalMeasMs  = 10000;  // empty-room measurement
-static const float    kCalSpan    = 4.0f;   // motion = 1.0 at (1+span) x noise ceiling
 static uint8_t  gCalPhase  = 0;             // 0 idle, 1 lead-in, 2 measuring
 static uint32_t gCalT0     = 0;
 static uint32_t gCalFailMs = 0;             // shows "CAL FAILED" briefly
@@ -81,83 +99,85 @@ static uint32_t gCalOkMs   = 0;             // shows "CALIBRATED" briefly
 
 static void IRAM_ATTR promiscuousRxCb(void*, wifi_promiscuous_pkt_type_t) {}
 
-static void IRAM_ATTR csiCallback(void*, wifi_csi_info_t* info) {
-    if (!info || !info->buf || info->len < 4) return;
-    gCsiCount++;
-    int8_t* b   = info->buf;
-    int  nPairs = info->len / 2;
+// WiFi task context: filter + copy only, the maths runs in loop().
+static void csiCallback(void*, wifi_csi_info_t* info) {
+    if (!info || !info->buf || info->len < 128 || !gBssidOk || !gCsiQ) return;
+    if (memcmp(info->mac, gBssid, 6) != 0) return;      // not from our router
+    CsiPkt pk;
+    memcpy(pk.buf, info->buf, 128);
+    pk.rssi = info->rx_ctrl.rssi;
+    if (xQueueSend(gCsiQ, &pk, 0) == pdTRUE) gCsiCount++;
+}
 
-    // Single pass: amplitude + mean sin(phase) = im/amp.
-    // Phase tracks slower/smaller motion that amplitude variance misses
-    // (similar to ruview's 40% amplitude / 30% phase weighting).
-    float ampSum = 0.0f, sinSum = 0.0f;
-    int   validPairs = 0;
-    for (int i = 0; i < nPairs; i++) {
-        float r  = (float)b[2*i];
-        float im = (float)b[2*i + 1];
-        float amp = sqrtf(r*r + im*im);
-        ampSum += amp;
-        if (amp > 1e-4f) { sinSum += im / amp; validPairs++; }
+static void processCsiPkt(const CsiPkt& pk, uint32_t now) {
+    // L-LTF order: subcarriers 0..31 then -32..-1. Data: 1..26 and -26..-1 (38..63).
+    float amp[kSub];
+    float sum = 0.0f;
+    int   j   = 0;
+    for (int k = 1; k <= 63; k++) {
+        if (k > 26 && k < 38) continue;                  // guard band
+        float a = (float)pk.buf[2*k], b = (float)pk.buf[2*k + 1];
+        amp[j] = sqrtf(a*a + b*b);
+        sum += amp[j++];
     }
-    float meanAmp      = ampSum / (float)nPairs;
-    float meanSinPhase = validPairs > 0 ? sinSum / (float)validPairs : 0.0f;
+    float mean = sum / kSub;
+    if (mean < 0.5f) return;                             // empty / bogus frame
+    float inv  = 1.0f / mean;
+    float* slot = gShape[gWinIdx];
+    for (int i = 0; i < kSub; i++) slot[i] = amp[i] * inv;
+    gWinIdx = (gWinIdx + 1) % kCsiWin;
+    if (gWinFill < kCsiWin) gWinFill++;
+    gLastPktMs = now;
+    gRssiEma  += ((float)pk.rssi - gRssiEma) * 0.1f;
+    gCsiRssi   = (int8_t)lroundf(gRssiEma);
+    if (gWinFill < kCsiWin) return;
 
-    gCsiAmpBuf[gCsiAmpIdx] = meanAmp;
-    gCsiPhaBuf[gCsiAmpIdx] = meanSinPhase;
-    gCsiAmpIdx = (gCsiAmpIdx + 1) % kCsiWindow;
-    if (gCsiAmpFilled < kCsiWindow) gCsiAmpFilled++;
-    int n = gCsiAmpFilled;
-
-    // Amplitude variance over window
-    float vsum = 0.0f;
-    for (int i = 0; i < n; i++) vsum += gCsiAmpBuf[i];
-    float vmean = vsum / (float)n;
-    float var   = 0.0f;
-    for (int i = 0; i < n; i++) { float d = gCsiAmpBuf[i] - vmean; var += d*d; }
-    var /= (float)n;
-
-    // Phase variance over window (variance of mean sin(phase))
-    float psum = 0.0f;
-    for (int i = 0; i < n; i++) psum += gCsiPhaBuf[i];
-    float pmean = psum / (float)n;
-    float pvar  = 0.0f;
-    for (int i = 0; i < n; i++) { float d = gCsiPhaBuf[i] - pmean; pvar += d*d; }
-    pvar /= (float)n;
-
-    // Normalize amplitude: asymmetric-EMA floor + running max → [0,1]
-    if (gCsiVarMin  < 0.0001f) gCsiVarMin  = var;
-    else gCsiVarMin  += (var  - gCsiVarMin)  * ((var  < gCsiVarMin)  ? 0.1f  : 0.002f);
-    if (var  > gCsiVarMax)  gCsiVarMax  = var;
-    else gCsiVarMax  += (var  - gCsiVarMax)  * 0.005f;
-    float range = gCsiVarMax - gCsiVarMin;
-    float ampMotion = (range > 0.0001f) ? ((var - gCsiVarMin) / range) : 0.0f;
-    if (ampMotion < 0.0f) ampMotion = 0.0f;
-    if (ampMotion > 1.0f) ampMotion = 1.0f;
-
-    // Normalize phase variance: same floor/max approach
-    if (gCsiPhaVarMin < 0.0001f) gCsiPhaVarMin = pvar;
-    else gCsiPhaVarMin += (pvar - gCsiPhaVarMin) * ((pvar < gCsiPhaVarMin) ? 0.1f : 0.002f);
-    if (pvar > gCsiPhaVarMax) gCsiPhaVarMax = pvar;
-    else gCsiPhaVarMax += (pvar - gCsiPhaVarMax) * 0.005f;
-    float prange = gCsiPhaVarMax - gCsiPhaVarMin;
-    float phaMotion = (prange > 0.0001f) ? ((pvar - gCsiPhaVarMin) / prange) : 0.0f;
-    if (phaMotion < 0.0f) phaMotion = 0.0f;
-    if (phaMotion > 1.0f) phaMotion = 1.0f;
-
-    gCsiVar  = var;
-    gCsiPVar = pvar;
-    if (gCalibrated) {
-        // Against the empty-room baseline: 0 at/below the noise ceiling,
-        // 1.0 at (1 + kCalSpan) times it.
-        ampMotion = (var  / gCalAmpRef - 1.0f) / kCalSpan;
-        phaMotion = (pvar / gCalPhaRef - 1.0f) / kCalSpan;
-        ampMotion = ampMotion < 0.0f ? 0.0f : (ampMotion > 1.0f ? 1.0f : ampMotion);
-        phaMotion = phaMotion < 0.0f ? 0.0f : (phaMotion > 1.0f ? 1.0f : phaMotion);
+    float acc = 0.0f;
+    for (int i = 0; i < kSub; i++) {
+        float m = 0.0f, q = 0.0f;
+        for (int w = 0; w < kCsiWin; w++) { float v = gShape[w][i]; m += v; q += v*v; }
+        m /= kCsiWin;
+        float var = q / kCsiWin - m*m;
+        if (var > 0.0f) acc += var;
     }
+    gCsiMetric = acc / kSub;
+}
 
-    // Blend: 60% amplitude, 40% phase (ruview weights: 40%/30%/30%)
-    gCsiMotion = 0.6f * ampMotion + 0.4f * phaMotion;
-    gCsiRssi   = info->rx_ctrl.rssi;
+static void drainCsi(uint32_t now) {
+    if (!gCsiQ) return;
+    CsiPkt pk;
+    int n = 0;
+    while (n++ < 32 && xQueueReceive(gCsiQ, &pk, 0) == pdTRUE) processCsiPkt(pk, now);
+}
+
+static void stopPing() {
+    if (!gPing) return;
+    esp_ping_stop(gPing);
+    esp_ping_delete_session(gPing);
+    gPing = nullptr;
+}
+
+// Ping the gateway 50x/s: every reply is a router frame carrying CSI.
+static void startPing() {
+    stopPing();
+    IPAddress gw = WiFi.gatewayIP();
+    esp_ping_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.count           = ESP_PING_COUNT_INFINITE;
+    cfg.interval_ms     = 20;
+    cfg.timeout_ms      = 1000;
+    cfg.data_size       = 8;
+    cfg.tos             = 0;
+    cfg.ttl             = 64;
+    IP_ADDR4(&cfg.target_addr, gw[0], gw[1], gw[2], gw[3]);
+    cfg.task_stack_size = 3072;
+    cfg.task_prio       = 2;
+    cfg.interface       = 0;
+    esp_ping_callbacks_t cbs;
+    memset(&cbs, 0, sizeof(cbs));
+    if (esp_ping_new_session(&cfg, &cbs, &gPing) == ESP_OK) esp_ping_start(gPing);
+    else gPing = nullptr;
+    Serial.printf("# CSI ping %s: %s\n", gw.toString().c_str(), gPing ? "on" : "FAILED");
 }
 #endif
 
@@ -387,11 +407,15 @@ static void saveWifiCreds(const char* ssid, const char* pass) {
 static void IRAM_ATTR sniffCallback(void*, wifi_promiscuous_pkt_type_t);  // defined later
 
 static void enableCsi() {
-    gCsiAmpIdx = 0; gCsiAmpFilled = 0;
-    gCsiVarMax = 0.001f; gCsiVarMin = 0.0f;
-    gCsiPhaVarMax = 0.001f; gCsiPhaVarMin = 0.0f;
-    memset(gCsiAmpBuf, 0, sizeof(gCsiAmpBuf));
-    memset(gCsiPhaBuf, 0, sizeof(gCsiPhaBuf));
+    if (!gCsiQ) gCsiQ = xQueueCreate(32, sizeof(CsiPkt));
+    gBssidOk = false;
+    const uint8_t* bssid = WiFi.BSSID();
+    if (bssid) { memcpy(gBssid, bssid, 6); gBssidOk = true; }
+    if (gCsiQ) xQueueReset(gCsiQ);
+    gWinIdx = 0; gWinFill = 0; gCsiMetric = 0.0f; gCsiMotion = 0.0f;
+    gFloor = 0.0f; gLastPktMs = 0; gRssiEma = (float)WiFi.RSSI();
+    Serial.printf("# CSI router %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  gBssid[0], gBssid[1], gBssid[2], gBssid[3], gBssid[4], gBssid[5]);
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_promiscuous_rx_cb(promiscuousRxCb);
     wifi_csi_config_t cfg = {};
@@ -405,6 +429,7 @@ static void enableCsi() {
     pf.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
     esp_wifi_set_promiscuous_filter(&pf);
     esp_wifi_set_promiscuous_rx_cb(sniffCallback);
+    startPing();
 }
 
 // Blocking WiFi picker UI. Returns true if connected on exit, false if cancelled.
@@ -609,7 +634,7 @@ static void initCsi() {
     Serial.println("# CSI active");
 }
 
-static double   gCalSumA = 0, gCalSqA = 0, gCalSumP = 0, gCalSqP = 0;
+static double   gCalSum = 0, gCalSq = 0;
 static uint32_t gCalN = 0, gCalCsi0 = 0;
 
 static void startCsiCal() {
@@ -619,71 +644,111 @@ static void startCsiCal() {
 }
 
 // Runs at 15 Hz from serviceCsi(). Returns true while calibration is in progress.
-static bool stepCsiCal(uint32_t now) {
+static bool stepCsiCal(uint32_t now, bool haveCsi) {
     if (gCalPhase == 1) {
         if (now - gCalT0 < kCalLeadMs) return true;
         gCalPhase = 2; gCalT0 = now; gCalN = 0; gCalCsi0 = gCsiCount;
-        gCalSumA = gCalSqA = gCalSumP = gCalSqP = 0;
+        gCalSum = gCalSq = 0;
         return true;
     }
     if (gCalPhase != 2) return false;
-    const double a = gCsiVar, p = gCsiPVar;
-    gCalSumA += a; gCalSqA += a * a; gCalSumP += p; gCalSqP += p * p; gCalN++;
+    if (haveCsi) {
+        const double v = gCsiMetric;
+        gCalSum += v; gCalSq += v * v; gCalN++;
+    }
     if (now - gCalT0 < kCalMeasMs) return true;
 
     gCalPhase = 0;
-    if (gCalN < 30 || gCsiCount - gCalCsi0 < 50) { gCalFailMs = now; return false; }  // too little traffic
-    const double mA = gCalSumA / gCalN, mP = gCalSumP / gCalN;
-    const double sA = sqrt(fmax(0.0, gCalSqA / gCalN - mA * mA));
-    const double sP = sqrt(fmax(0.0, gCalSqP / gCalN - mP * mP));
-    gCalAmpRef  = (float)fmax(mA + 3.0 * sA, 1e-4);
-    gCalPhaRef  = (float)fmax(mP + 3.0 * sP, 1e-7);
+    const uint32_t frames = gCsiCount - gCalCsi0;
+    if (gCalN < 100 || frames < 150) {                 // < 15 router frames/s
+        gCalFailMs = now;
+        Serial.printf("# CAL failed: samples=%lu frames=%lu\n",
+                      (unsigned long)gCalN, (unsigned long)frames);
+        return false;
+    }
+    const double m  = gCalSum / gCalN;
+    const double sd = sqrt(fmax(0.0, gCalSq / gCalN - m * m));
+    gCalRef     = (float)fmax(m + 3.0 * sd, 1e-7);
     gCalibrated = true;
     gCalOkMs    = now;
-    Serial.printf("# CAL done: n=%lu ampRef=%.5f phaRef=%.7f\n",
-                  (unsigned long)gCalN, gCalAmpRef, gCalPhaRef);
+    Serial.printf("# CAL done: n=%lu frames=%lu mean=%.6f sd=%.6f ref=%.6f\n",
+                  (unsigned long)gCalN, (unsigned long)frames, m, sd, gCalRef);
     return false;
 }
 
 static void serviceCsi() {
     static uint32_t seq        = 0;
     static uint32_t last       = 0;
+    static uint32_t rateT0     = 0;
+    static uint32_t rateCnt0   = 0;
     static int      holdCnt    = 0;
     static float    heldMotion = 0.0f;
     const  int      kHold      = 150;   // 10 s at 15 Hz
 
     uint32_t now = millis();
-    if (now - last < 66) return;
+
+    if (wifiReady && WiFi.status() != WL_CONNECTED) {
+        // WiFi dropped: stop sensing; radar goes stale -> NO LINK
+        wifiReady  = false;
+        holdCnt    = 0;
+        heldMotion = 0.0f;
+        stopPing();
+        esp_wifi_set_csi(false);
+        esp_wifi_set_promiscuous(false);
+        gCsiMotion = 0.0f;
+        if (gCalPhase) { gCalPhase = 0; gCalFailMs = now; }  // calibration needs CSI
+    } else if (!wifiReady && WiFi.status() == WL_CONNECTED) {
+        // Reconnected (auto-reconnect): restart sensing
+        strncpy(wifiIP, WiFi.localIP().toString().c_str(), sizeof(wifiIP) - 1);
+        wifiReady = true;
+        enableCsi();
+    }
+    if (!wifiReady) return;
+
+    drainCsi(now);                       // every loop: keep the queue empty
+    if (now - last < 66) return;         // UI frames at 15 Hz
     last = now;
 
-    if (!wifiReady || WiFi.status() != WL_CONNECTED) {
-        if (wifiReady) {
-            // WiFi just dropped — stop CSI and clear frozen state
-            wifiReady  = false;
-            holdCnt    = 0;
-            heldMotion = 0.0f;
-            esp_wifi_set_csi(false);
-            esp_wifi_set_promiscuous(false);
-            gCsiMotion = 0.0f;
-            if (gCalPhase) { gCalPhase = 0; gCalFailMs = millis(); }  // calibration needs CSI
-        }
-        return;  // no frames injected → radar goes stale → NO LINK shown
+    if (now - rateT0 >= 1000) {
+        gPktRate = (uint16_t)(gCsiCount - rateCnt0);
+        rateCnt0 = gCsiCount;
+        rateT0   = now;
     }
 
-    // Hold/coast logic at known 15 Hz rate (CSI callback rate varies with traffic).
-    // Once motion is detected, presence coasts for ~10 s so a still person stays
-    // on the scope. Motion decays from its peak toward 10% so the blip fades
-    // gracefully rather than snapping off.
-    if (stepCsiCal(now)) {
+    const bool haveCsi = gWinFill >= kCsiWin && gLastPktMs && (now - gLastPktMs) < 2000;
+    float raw = 0.0f;
+    if (haveCsi) {
+        // AUTO floor: falls fast, rises very slowly (~90 s), so it settles on the quiet level.
+        if (gFloor <= 0.0f)             gFloor = gCsiMetric;
+        else if (gCsiMetric < gFloor)   gFloor += (gCsiMetric - gFloor) * 0.2f;
+        else                            gFloor += (gCsiMetric - gFloor) * 0.0007f;
+        float ref = gCalibrated ? gCalRef : gFloor * kAutoMargin;
+        if (ref < 1e-7f) ref = 1e-7f;
+        raw = (gCsiMetric / ref - 1.0f) / kCsiSpan;
+        raw = raw < 0.0f ? 0.0f : (raw > 1.0f ? 1.0f : raw);
+    }
+    gCsiMotion += (raw - gCsiMotion) * 0.4f;
+
+    char line[48];
+    if (stepCsiCal(now, haveCsi)) {
         // No contacts while learning the empty room.
         holdCnt = 0; heldMotion = 0.0f;
-        char cl[48];
-        snprintf(cl, sizeof(cl), "R,%lu,0,%.3f,%d,CAL",
-                 (unsigned long)(++seq), (float)gCsiMotion, (int)gCsiRssi);
-        radar.injectLine(cl);
+        snprintf(line, sizeof(line), "R,%lu,0,%.3f,%d,CAL",
+                 (unsigned long)(++seq), gCsiMotion, (int)gCsiRssi);
+        radar.injectLine(line);
+        return;
+    }
+    if (!haveCsi) {
+        // Connected but no router frames (router ignores ping / starting up)
+        holdCnt = 0; heldMotion = 0.0f;
+        snprintf(line, sizeof(line), "R,%lu,0,0.000,%d,NO CSI",
+                 (unsigned long)(++seq), (int)gCsiRssi);
+        radar.injectLine(line);
         return;
     }
 
+    // Presence coasts ~10 s after the last motion above threshold so a person who
+    // stops moving stays on the scope; the blip fades from its peak toward 10%.
     float m = gCsiMotion;
     bool present;
     if (m > gThreshold) {
@@ -700,7 +765,6 @@ static void serviceCsi() {
         m       = 0.0f;
     }
 
-    char line[48];
     snprintf(line, sizeof(line), "R,%lu,%d,%.3f,%d,%s",
              (unsigned long)(++seq), (int)present, m, (int)gCsiRssi,
              gCalibrated ? "RUN" : "AUTO");
@@ -842,7 +906,9 @@ static void drawBottom() {
 #endif
   drawBatIcon(canvas, 2, 3);
   const char* tag  = !linkOk ? "NO LINK" : (calib ? "CAL" : s.mode);
-  uint16_t    pill = !linkOk ? TFT_RED : (calib ? canvas.color565(255, 140, 0) : canvas.color565(0, 180, 80));
+  const bool  noCsi = linkOk && strcmp(s.mode, "NO CSI") == 0;
+  uint16_t    pill = (!linkOk || noCsi) ? TFT_RED
+                   : (calib ? canvas.color565(255, 140, 0) : canvas.color565(0, 180, 80));
   int tw = canvas.textWidth(tag) + 8;
   canvas.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
   canvas.setTextColor(TFT_WHITE, pill);
@@ -900,8 +966,13 @@ static void drawBottom() {
 
   // footer
   char foot[48];
+#if defined(RADAR_CSI)
+  snprintf(foot, sizeof(foot), "mot %3d%%  %ddBm  thr %2d%%  %u/s",
+           (int)(s.motion * 100), s.rssi, (int)(gThreshold * 100), (unsigned)gPktRate);
+#else
   snprintf(foot, sizeof(foot), "mot %3d%%  rssi %ddBm  thr %2d%%",
            (int)(s.motion * 100), s.rssi, (int)(gThreshold * 100));
+#endif
   canvas.setTextColor(cCyan, TFT_BLACK);
   canvas.drawString(foot, 4, gy + gh + 4);
   canvas.setTextColor(cPurple, TFT_BLACK);

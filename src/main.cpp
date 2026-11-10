@@ -94,7 +94,13 @@ static const uint32_t kCalLeadMs  = 3000;   // time to step out of the room
 static const uint32_t kCalMeasMs  = 10000;  // empty-room measurement
 static uint8_t  gCalPhase  = 0;             // 0 idle, 1 lead-in, 2 measuring
 static uint32_t gCalT0     = 0;
-static uint32_t gCalFailMs = 0;             // shows "CAL FAILED" briefly
+static uint32_t gCalFailMs = 0;             // shows the failure reason briefly
+static const char* gCalFailWhy = "CAL FAILED";
+// Calibration samples are taken per received router frame (processCsiPkt), not
+// per UI loop: the loop rate depends on screen drawing (~7-10 Hz with the
+// external screen), which made the old per-loop sample count fail every time.
+static double   gCalSum = 0, gCalSq = 0;
+static uint32_t gCalN = 0, gCalCsi0 = 0;
 static uint32_t gCalOkMs   = 0;             // shows "CALIBRATED" briefly
 
 // ── Device-motion guard (built-in BMI270 IMU) ─────────────────────────────────
@@ -216,6 +222,10 @@ static void processCsiPkt(const CsiPkt& pk, uint32_t now) {
         if (var > 0.0f) acc += var;
     }
     gCsiMetric = acc / kSub;
+    if (gCalPhase == 2) {                       // empty-room calibration running
+        const double v = gCsiMetric;
+        gCalSum += v; gCalSq += v * v; gCalN++;
+    }
 }
 
 static void drainCsi(uint32_t now) {
@@ -712,17 +722,14 @@ static void initCsi() {
     Serial.println("# CSI active");
 }
 
-static double   gCalSum = 0, gCalSq = 0;
-static uint32_t gCalN = 0, gCalCsi0 = 0;
-
 static void startCsiCal() {
     if (gCalPhase) { gCalPhase = 0; return; }          // c again = cancel
-    if (!wifiReady) { gCalFailMs = millis(); return; } // no WiFi -> no CSI
+    if (!wifiReady) { gCalFailWhy = "CAL: NO WIFI"; gCalFailMs = millis(); return; }
     gCalPhase = 1; gCalT0 = millis(); gCalFailMs = gCalOkMs = 0;
 }
 
-// Runs at 15 Hz from serviceCsi(). Returns true while calibration is in progress.
-static bool stepCsiCal(uint32_t now, bool haveCsi) {
+// Runs from serviceCsi(). Returns true while calibration is in progress.
+static bool stepCsiCal(uint32_t now, bool) {
     if (gCalPhase == 1) {
         if (now - gCalT0 < kCalLeadMs) return true;
         gCalPhase = 2; gCalT0 = now; gCalN = 0; gCalCsi0 = gCsiCount;
@@ -730,15 +737,12 @@ static bool stepCsiCal(uint32_t now, bool haveCsi) {
         return true;
     }
     if (gCalPhase != 2) return false;
-    if (haveCsi) {
-        const double v = gCsiMetric;
-        gCalSum += v; gCalSq += v * v; gCalN++;
-    }
     if (now - gCalT0 < kCalMeasMs) return true;
 
     gCalPhase = 0;
     const uint32_t frames = gCsiCount - gCalCsi0;
-    if (gCalN < 100 || frames < 150) {                 // < 15 router frames/s
+    if (frames < 80 || gCalN < 50) {                   // < 8 router frames/s
+        gCalFailWhy = "CAL: LOW SIGNAL";
         gCalFailMs = now;
         Serial.printf("# CAL failed: samples=%lu frames=%lu\n",
                       (unsigned long)gCalN, (unsigned long)frames);
@@ -774,7 +778,7 @@ static void serviceCsi() {
         esp_wifi_set_csi(false);
         esp_wifi_set_promiscuous(false);
         gCsiMotion = 0.0f;
-        if (gCalPhase) { gCalPhase = 0; gCalFailMs = now; }  // calibration needs CSI
+        if (gCalPhase) { gCalPhase = 0; gCalFailWhy = "CAL: WIFI LOST"; gCalFailMs = now; }
     } else if (!wifiReady && WiFi.status() == WL_CONNECTED) {
         // Reconnected (auto-reconnect): restart sensing
         strncpy(wifiIP, WiFi.localIP().toString().c_str(), sizeof(wifiIP) - 1);
@@ -1053,7 +1057,7 @@ static void drawBottom() {
     snprintf(calLbl, sizeof(calLbl), "CALIBRATE %lu", (unsigned long)((kCalMeasMs - el + 999) / 1000));
     lbl = calLbl;
   } else if (gCalFailMs && nowMs - gCalFailMs < 3000) {
-    lbl = "CAL FAILED";
+    lbl = gCalFailWhy;
   } else if (gCalOkMs && nowMs - gCalOkMs < 2000) {
     lbl = "CALIBRATED";
   } else if (gRelocMs && nowMs - gRelocMs < 4000) {

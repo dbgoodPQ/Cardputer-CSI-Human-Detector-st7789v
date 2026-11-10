@@ -237,6 +237,7 @@ static void processCsiPkt(const CsiPkt& pk, uint32_t now) {
         if (var > 0.0f) acc += var;
     }
     gCsiMetric = acc / kSub;
+    if (gCalPhase == 2) { const double v = gCsiMetric; gCalSum += v; gCalSq += v * v; gCalN++; }
 }
 
 static void stopPing() {
@@ -321,11 +322,11 @@ static bool stepCal(uint32_t now, bool haveCsi) {
         return true;
     }
     if (gCalPhase != 2) return false;
-    if (haveCsi) { const double v = gCsiMetric; gCalSum += v; gCalSq += v * v; gCalN++; }
+    (void)haveCsi;                                  // samples come from processCsiPkt
     if (now - gCalT0 < kCalMeasMs) return true;
     gCalPhase = 0;
     const uint32_t frames = gCsiCount - gCalCsi0;
-    if (gCalN < 100 || frames < 150) {
+    if (frames < 80 || gCalN < 50) {
         Serial.printf("# CAL failed: samples=%lu frames=%lu\n", (unsigned long)gCalN, (unsigned long)frames);
         return false;
     }

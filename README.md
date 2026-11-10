@@ -132,7 +132,8 @@ on the scope for about 10 s after their last movement, then disappears. Through-
 - Moving the Cardputer to a new spot drops the calibration on purpose: recalibrate there.
   It doesn't recalibrate by itself, because you're usually still in the room right after moving it.
 - If you pick it up during calibration, the countdown restarts once it is still again.
-- Calibrate (`c`) once everything is in place. `CAL FAILED` means too few router frames or Wi-Fi dropped.
+- Calibrate (`c`) once everything is in place. If it fails, the banner says why: `CAL: LOW SIGNAL`
+  (fewer than ~8 router frames/s, check the `/s` number on the footer), `CAL: NO WIFI` or `CAL: WIFI LOST`.
 - After calibrating, an empty room should sit near 0% motion. If you get false contacts, raise the
   threshold with `/`; if you're missed, lower it with `,`.
 

@@ -40,6 +40,10 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 - `serviceCsi` (15 Hz): motion = (metric/ref - 1)/`kCsiSpan`; ref = `gCalRef`
   (empty-room mean+3sd, key c) or `kAutoMargin` x slow floor (AUTO). Modes:
   AUTO | CAL | RUN | MOVED | NO CSI. Threshold `gThreshold` (, /), saved in prefs.
+- Calibration samples are taken per router frame in `processCsiPkt` (not per UI
+  loop: the loop only runs ~7-10 Hz because of screen pushes, which made the old
+  "100 loop samples" check fail every time). Valid if >= 80 frames and >= 50
+  samples in 10 s; failure reason on the banner (CAL: LOW SIGNAL / NO WIFI / WIFI LOST).
 - IMU guard (`serviceImu`, BMI270 via M5.Imu on In_I2C, 50 Hz): gyro > 6 dps or
   |accel - gravity| > 0.05 g => MOVED, CSI window flushed, floor frozen, until
   2 s still. Tilt > 5 deg or > 1.5 s of movement = relocation => calibration
@@ -119,9 +123,8 @@ M5GFX 0.3.0's board detection probes G5/G6 (= external CS/DC) and misdetects
 the ADV (rotated internal screen, dead external screen). Don't unpin without
 re-testing on hardware.
 ✅ IMU device-motion guard (pauses sensing while the Cardputer moves).
-🧪 Sensor nodes + ZONES view: implemented and building in CI, NOT yet tested on
-hardware (pairing timing, UDP broadcast on the user's network, node CSI on
-classic ESP32). User has 3 WROOM-32/32D boards, one per room (option B).
+✅ Sensor nodes: user paired 3 nodes successfully (ESP-NOW pairing + UDP OK).
+🧪 Calibration fix (per-frame sampling) not yet confirmed on hardware. User has 3 WROOM-32/32D boards, one per room (option B).
 ⚠️ Tuning constants are first estimates, not yet tuned on real data:
 `kCsiSpan`=4, `kAutoMargin`=2, `kCsiWin`=25, hold `kHold`=150 (10 s),
 default threshold 0.15, IMU thresholds 6 dps / 0.05 g / 2 s settle.

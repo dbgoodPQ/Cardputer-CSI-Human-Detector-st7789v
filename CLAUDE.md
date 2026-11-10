@@ -16,9 +16,13 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 - **Console:** **Cardputer ADV** (ESP32-**S3**) connects to `SQUACHNET`, receives
   UDP frames on port 4210, runs the UI, drives two screens.
 - **Displays (different content per screen, NOT a clone):**
-  - Top = external **Waveshare 2" ST7789V** (320x240 @ rotation `EXT_ROTATION`=1): PPI **radar scope**
-    (rotating sweep + phosphor trail; motion>threshold paints stable contact
-    blips — radius from RSSI, size/heat from motion).
+  - Top = external **Waveshare 2" ST7789V** (320x240 @ rotation `EXT_ROTATION`=1):
+    **range cone** (`drawTop()`): apex = Cardputer at the bottom, distance lines
+    every 1 m to 5 m or every 2 m to 10 m (`gRange10`, key r, saved in prefs).
+    CSI has no distance, so motion = whole-cone glow + `MOTION xx%`; no dots.
+    LD2410 later: dots on the centre line at the measured distance (moving =
+    magenta, still = cyan) with a dashed band across the cone. `.` toggles the
+    3D raycaster view (unchanged, still has its own illustrative blips).
   - Bottom = built-in 1.14" (240x135): WiFi IP, status pill, PRESENCE/CLEAR
     banner, scrolling motion graph, threshold + key hints.
 - **No router needed (UART/UDP builds only):** S3 is the AP; Cardputer connects
@@ -68,7 +72,7 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 ## Files
 - `include/radar_link.h` — protocol parser + state + 240-sample motion history +
   command senders. No display deps. Has `injectLine()` for fake frames.
-- `src/main.cpp` — UI: `drawBottom()` (status), `drawTop()` (radar scope),
+- `src/main.cpp` — UI: `drawBottom()` (status), `drawTop()` (range cone),
   `drawRaycaster()` (vaporwave 3D mode), `serviceKeys()`, fake generator.
   Bottom @30 fps, top @~8 fps.
 - `include/ext_panel.h` — external ST7789V panel class (`LGFX_ExtST7789`).
@@ -92,8 +96,8 @@ re-testing on hardware.
 ⚠️ Tuning constants are first estimates, not yet tuned on real data:
 `kCsiSpan`=4, `kAutoMargin`=2, `kCsiWin`=25, hold `kHold`=150 (10 s),
 default threshold 0.15, IMU thresholds 6 dps / 0.05 g / 2 s settle.
-ℹ️ Blip angle is random and radius follows router RSSI: scope position is
-illustrative only. Spycam icons = OUI match on sniffed MACs (many false
+ℹ️ Range cone replaced the PPI radar circle (user request; mockup on a claude.ai
+Design canvas "Range Cone Screen"). 3D view blips remain illustrative. Spycam icons = OUI match on sniffed MACs (many false
 positives: ESP32, Amazon, Realtek are generic).
 ℹ️ The UART/UDP builds (`cardputer-radar`, `cardputer-radar-wifi`) and
 `tools/sensor_s3` are inherited from the original and untouched by this fork.
@@ -108,7 +112,8 @@ positives: ESP32, Amazon, Realtek are generic).
 5. **TODO (user request, later): add mmWave radar HLK-LD2410** (24 GHz, UART,
    5 V) on the Grove port (G1/G2 = Serial1). Detects still people (breathing
    micro-motion) + distance gates; fuse with CSI (contact if either is
-   confident, distance from the radar). Grove can do UART *or* I2C, not both.
+   confident, distance from the radar). Draw its moving/still targets as dots
+   in the range cone (design already agreed with the user). Grove can do UART *or* I2C, not both.
 6. **Presence event log** on the bottom screen with optional SD persistence.
 7. **Port sensing to ESP32-C5** (MonsterC5) later: different
    `wifi_csi_acquire_config_t` (no `lltf_en`, `sig_mode`, ...).

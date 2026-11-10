@@ -262,6 +262,7 @@ static M5Canvas        canvas(&M5Cardputer.Display);   // bottom (built-in) buff
 static LGFX_ExtST7789  extPanel;                       // external Waveshare 2" ST7789V
 static M5Canvas        topCanvas(&extPanel);           // top render buffer (240x180)
 static bool            extReady   = false;
+static bool            gRange10   = false;  // range cone: false = 5 m / 1 m lines, true = 10 m / 2 m
 #if defined(RADAR_CSI)
 static float           gThreshold = 0.15f;   // = kCsiThresh, the original fixed CSI threshold
 #else
@@ -334,6 +335,7 @@ static void saveSettings() {
     prefs.putUChar("bright",    gBright);
     prefs.putUChar("extbright", gExtBright);
     prefs.putUChar("thresh",    (uint8_t)lroundf(gThreshold * 100));
+    prefs.putUChar("range10",   gRange10 ? 1 : 0);
     prefs.end();
 }
 
@@ -344,6 +346,7 @@ static void loadSettings() {
     gBright    = prefs.getUChar("bright",   80);
     gExtBright = prefs.getUChar("extbright",80);
     uint8_t thr = prefs.getUChar("thresh", (uint8_t)lroundf(gThreshold * 100));
+    gRange10   = prefs.getUChar("range10", 0) != 0;
     prefs.end();
     if (thr >= 5 && thr <= 95) gThreshold = thr / 100.0f;
     if (gColorIdx >= kNumPalettes) gColorIdx = 0;
@@ -1095,7 +1098,7 @@ struct Ripple { float ang; float rad; uint32_t birth; bool active; };
 static Ripple         ripples[6];
 static float          gBEAR = 0.0f;
 static float          gLastBrg  = 0.0f;
-static int            gViewMode = 0;   // 0 = PPI radar scope, 1 = 3-D raycaster
+static int            gViewMode = 0;   // 0 = range cone, 1 = 3-D raycaster
 
 // Returns an angle in [0, TAU) that avoids ±30° around 6 o'clock (π/2) and 12 o'clock (3π/2).
 // Blips spawned at these angles overlap the central ghost avatar in the raycaster view.
@@ -1211,7 +1214,7 @@ static Bird3D gBirds3D[3];
 static ShotSt gShot3D;
 static bool   g3DReady = false;
 
-static void drawRain(uint32_t now) {
+__attribute__((unused)) static void drawRain(uint32_t now) {
   static const char GL[]  = "0123456789ABCDEF!:;@#%";
   static const int  GLN   = 22;
   static const int  TRAIL = 7;
@@ -1653,8 +1656,7 @@ static void drawRaycaster() {
   topCanvas.setTextColor(ctCol, cBar);
   topCanvas.drawString(ctlbl, 14, H - 11);
   char midStr[14];
-  if (present) snprintf(midStr, sizeof(midStr), "BRG:%03.0f", gLastBrg);
-  else         snprintf(midStr, sizeof(midStr), "T:%d%%",     (int)(gThreshold * 100));
+  snprintf(midStr, sizeof(midStr), "T:%d%%", (int)(gThreshold * 100));
   topCanvas.setTextColor(present ? topCanvas.color565(255, 140, 60) : topCanvas.color565(100, 0, 110), cBar);
   topCanvas.drawString(midStr, (W - topCanvas.textWidth(midStr)) / 2, H - 11);
   char stats[24];
@@ -1675,6 +1677,21 @@ static void drawRaycaster() {
   topCanvas.pushRotateZoom(160, 120, 0.0f, EXT_ZOOM, EXT_ZOOM);
 }
 
+// Range cone (ST7789V fork; replaces the PPI radar circle).
+// The Cardputer sits at the apex at the bottom; lines mark distance every 1 m
+// (5 m range) or every 2 m (10 m range, key r). Wi-Fi CSI knows THAT something
+// moves and how strongly, not where, so motion lights up the whole cone instead
+// of drawing a dot at an invented distance. Distance dots arrive with the
+// LD2410 mmWave radar (see CLAUDE.md, next steps).
+static uint16_t blend565(uint16_t bg, uint16_t fg, float a) {
+  if (a <= 0.0f) return bg;
+  if (a >= 1.0f) return fg;
+  int br = (bg >> 11) & 31, bgc = (bg >> 5) & 63, bb = bg & 31;
+  int fr = (fg >> 11) & 31, fgc = (fg >> 5) & 63, fb = fg & 31;
+  int r = br + (int)((fr - br) * a), g = bgc + (int)((fgc - bgc) * a), b = bb + (int)((fb - bb) * a);
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
 static void drawTop() {
   if (!extReady) return;
   const auto& s = radar.state();
@@ -1682,235 +1699,104 @@ static void drawTop() {
   const bool     present = linkOk && s.presence;
   const uint32_t now     = millis();
 
-  const int W  = topCanvas.width();   // 240
-  const int H  = topCanvas.height();  // 180
-  const int cx = 120, cy = 90, R = 74;
-  const float TAU = 6.2831853f;
+  const int W = topCanvas.width();   // 240 (x1.333 on the panel)
+  const int H = topCanvas.height();  // 180
+  const int apexX = 120, apexY = 166, topY = 22, halfTop = 112;
+  const int coneH = apexY - topY;    // 144 px = full range
 
-  // brand palette
   const uint16_t cMag    = gColA;
   const uint16_t cCyan   = gColB;
-  const uint16_t cPurple = topCanvas.color565( 70,   0,  70);
   const uint16_t cBar    = topCanvas.color565( 20,   0,  35);
   const uint16_t cBorder = topCanvas.color565(160,   0, 160);
-  const uint16_t scopeBg = topCanvas.color565(  4,   0,   8);
+  const uint16_t coneBg  = topCanvas.color565( 12,   0,  24);
+  const uint16_t cLine   = present ? topCanvas.color565(180, 0, 180) : topCanvas.color565(90, 0, 90);
 
-  bool blink = (now % 600) < 300;
-  static float prevSweep = 0.0f;
-
-  float sweep = (float)(now % 6000) / 6000.0f * TAU;
-
-  // Single-sensor CSI has no directional data, so bearing is fixed at 0.
-  // (IMU-based rotation caused contacts to orbit when the device moved.)
-  const float BEAR = 0.0f;
-  gBEAR = BEAR;
-
-  // Contacts: merge close blips (same person), spawn new ones for distinct rings.
-  if (present) {
-    float t = ((float)s.rssi + 45.0f) / (-33.0f);
-    if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
-    float targetRad   = R * (0.25f + t * 0.65f);
-    if (targetRad < R * 0.30f) targetRad = R * 0.30f;
-    const float mergeThresh = R * 0.20f;  // ~15 px ≈ a few feet of RSSI change
-
-    // Update all active blips; find closest to the current RSSI ring.
-    int   closestIdx  = -1;
-    float closestDist = (float)R;
-    for (int i = 0; i < 12; ++i) {
-      if (!blips[i].active || blips[i].birth + BLIP_LIFE <= now) continue;
-      blips[i].strength += (s.motion - blips[i].strength) * 0.12f;
-      float d = fabsf(blips[i].rad - targetRad);
-      if (d < closestDist) { closestDist = d; closestIdx = i; }
-    }
-
-    if (closestIdx >= 0 && closestDist <= mergeThresh) {
-      // Same contact — refresh life and gently nudge toward current radius.
-      blips[closestIdx].birth  = now;
-      blips[closestIdx].rad   += (targetRad - blips[closestIdx].rad) * 0.05f;
-    } else if (now - lastSpawn > 800) {
-      // New or distinct position — spawn a separate dot.
-      int slot = -1;
-      for (int i = 0; i < 12; ++i) { if (!blips[i].active) { slot = i; break; } }
-      if (slot < 0) {
-        uint32_t oldest = UINT32_MAX;
-        for (int i = 0; i < 12; ++i) if (blips[i].birth < oldest) { oldest = blips[i].birth; slot = i; }
-      }
-      if (slot >= 0) {
-        gLastSpawnAng = pickBlipAngle();
-        blips[slot].ang      = gLastSpawnAng;
-        blips[slot].rad      = targetRad;
-        blips[slot].strength = s.motion;
-        blips[slot].birth    = now;
-        blips[slot].active   = true;
-        lastSpawn            = now;
-        gLastBrg = fmodf((gLastSpawnAng + TAU / 4.0f) * (360.0f / TAU) + 360.0f, 360.0f);
-        for (int r = 0; r < 6; ++r) {
-          if (!ripples[r].active) { ripples[r] = { gLastSpawnAng, targetRad, now, true }; break; }
-        }
-      }
-    }
-  }
-
-  // sonar ping: spawn a ripple ring when the sweep arm crosses an active blip
-  {
-    float ps = fmodf(prevSweep, TAU), cs = fmodf(sweep, TAU);
-    for (int i = 0; i < 12; ++i) {
-      if (!blips[i].active) continue;
-      float ba = fmodf(blips[i].ang, TAU);
-      if (ba < 0) ba += TAU;
-      bool crossed = (cs >= ps) ? (ba >= ps && ba < cs) : (ba >= ps || ba < cs);
-      if (crossed) {
-        for (int r = 0; r < 6; ++r) {
-          if (!ripples[r].active) { ripples[r] = { blips[i].ang, blips[i].rad, now, true }; break; }
-        }
-      }
-    }
-  }
-  prevSweep = sweep;
-
-  // --- layer 1: clear + matrix rain ---
   topCanvas.fillSprite(TFT_BLACK);
-  drawRain(now);
 
-  // --- layer 2: scope disc + grid ---
-  topCanvas.fillCircle(cx, cy, R, scopeBg);
-  topCanvas.drawCircle(cx, cy, R,          topCanvas.color565(  0,  80, 100));  // outer: teal
-  topCanvas.drawCircle(cx, cy, R * 2 / 3, topCanvas.color565( 80,   0, 100));  // mid: dark magenta
-  topCanvas.drawCircle(cx, cy, R / 3,     topCanvas.color565(  0,  50,  80));  // inner: cyan-blue
-  const uint16_t cXhair = topCanvas.color565(35, 0, 35);
-  float nsAng = -TAU / 4.0f + BEAR;
-  topCanvas.drawLine(cx + (int)(R * cosf(nsAng)),            cy + (int)(R * sinf(nsAng)),
-                     cx + (int)(R * cosf(nsAng + TAU / 2)), cy + (int)(R * sinf(nsAng + TAU / 2)), cXhair);
-  topCanvas.drawLine(cx + (int)(R * cosf(BEAR)),             cy + (int)(R * sinf(BEAR)),
-                     cx + (int)(R * cosf(BEAR + TAU / 2)),  cy + (int)(R * sinf(BEAR + TAU / 2)), cXhair);
-  for (int d = 0; d < 12; ++d) {
-    float a = d * (TAU / 12.0f) + BEAR;
-    topCanvas.drawLine(cx + (int)((R - 5) * cosf(a)), cy + (int)((R - 5) * sinf(a)),
-                       cx + (int)(R * cosf(a)),        cy + (int)(R * sinf(a)), cPurple);
+  // --- cone, row by row: background + motion glow (strong near the device) ---
+  const float glow = present ? s.motion : 0.0f;
+  for (int y = topY; y <= apexY; ++y) {
+    int hw = halfTop * (apexY - y) / coneH;
+    float depth = (float)(apexY - y) / coneH;           // 0 at the device, 1 at full range
+    float a = glow * (0.55f - 0.43f * depth);
+    topCanvas.drawFastHLine(apexX - hw, y, 2 * hw + 1, blend565(coneBg, cMag, a));
   }
+  topCanvas.drawLine(apexX, apexY, apexX - halfTop, topY, cBorder);
+  topCanvas.drawLine(apexX, apexY, apexX + halfTop, topY, cBorder);
+
+  // --- distance lines + labels ---
+  const int step = gRange10 ? 2 : 1;
   topCanvas.setTextSize(1);
-  const char* cLbl[4]  = { "N", "E", "S", "W" };
-  const float cBase[4] = { -TAU / 4.0f, 0.0f, TAU / 4.0f, TAU / 2.0f };
-  for (int ci = 0; ci < 4; ci++) {
-    float a = cBase[ci] + BEAR;
-    int lx = cx + (int)((R - 11) * cosf(a)) - 2;
-    int ly = cy + (int)((R - 11) * sinf(a)) - 4;
-    topCanvas.setTextColor(ci == 0 ? TFT_WHITE : cCyan, scopeBg);  // N = white for quick ID
-    topCanvas.drawString(cLbl[ci], lx, ly);
-  }
-  topCanvas.setTextColor(topCanvas.color565(45, 0, 55), scopeBg);
-  topCanvas.drawString("1", cx + R / 3 + 1,     cy - 8);
-  topCanvas.drawString("2", cx + R * 2 / 3 + 1, cy - 8);
-  topCanvas.drawString("3", cx + R + 1,          cy - 8);
-
-  // --- layer 3: phosphor sweep trail (dark blue tail → magenta head) ---
-  const int TRAIL = 22;
-  for (int k = TRAIL; k >= 1; --k) {
-    float a  = (sweep + BEAR) - k * 0.040f;
-    float t  = 1.0f - (float)k / TRAIL;
-    float b2 = t * t;
-    uint8_t r  = (uint8_t)(220 * b2);
-    uint8_t bl = (uint8_t)(40 + 160 * b2);
-    topCanvas.drawLine(cx, cy, cx + (int)(R * cosf(a)), cy + (int)(R * sinf(a)),
-                       topCanvas.color565(r, 0, bl));
+  for (int k = 1; k <= 5; ++k) {
+    int y  = apexY - k * coneH / 5;
+    int hw = halfTop * (apexY - y) / coneH;
+    topCanvas.drawFastHLine(apexX - hw, y, 2 * hw + 1, cLine);
+    char lb[6]; snprintf(lb, sizeof(lb), "%dm", k * step);
+    topCanvas.setTextColor(cCyan);
+    topCanvas.drawString(lb, apexX + hw - topCanvas.textWidth(lb) - 1, y - 9);
   }
 
-  // --- layer 4: contacts — cyan → purple → magenta → white-pink ---
-  int contacts = 0;
-  for (int i = 0; i < 12; ++i) {
-    if (!blips[i].active) continue;
-    uint32_t age = now - blips[i].birth;
-    if (age > BLIP_LIFE) { blips[i].active = false; continue; }
-    contacts++;
-    float fade = 1.0f - (float)age / BLIP_LIFE;
-    int bx = cx + (int)(blips[i].rad * cosf(blips[i].ang + BEAR));
-    int by = cy + (int)(blips[i].rad * sinf(blips[i].ang + BEAR));
-    int sz = 2 + (int)(blips[i].strength * 4);
-    float str = blips[i].strength;
-    uint16_t col;
-    if      (str > 0.85f) col = topCanvas.color565((uint8_t)(255*fade),(uint8_t)(180*fade),(uint8_t)(255*fade));
-    else if (str > 0.70f) col = topCanvas.color565((uint8_t)(255*fade), 0,                 (uint8_t)(200*fade));
-    else if (str > 0.50f) col = topCanvas.color565((uint8_t)(140*fade), 0,                 (uint8_t)(255*fade));
-    else                  col = topCanvas.color565( 0,                  (uint8_t)(200*fade),(uint8_t)(255*fade));
-    topCanvas.fillCircle(bx, by, sz, col);
-    if (fade > 0.6f) topCanvas.drawCircle(bx, by, sz + 2, col);
+  // --- state text inside the cone ---
+  char big[16] = "";
+  const char* small = nullptr;
+  uint16_t bigCol = cCyan;
+  if (!linkOk) {
+    strcpy(big, "NO LINK"); bigCol = TFT_RED;
+  } else if (strcmp(s.mode, "NO CSI") == 0) {
+    strcpy(big, "NO SIGNAL"); bigCol = TFT_RED; small = "no router frames";
+  } else if (strcmp(s.mode, "MOVED") == 0) {
+    strcpy(big, "MOVED"); bigCol = topCanvas.color565(255, 140, 0); small = "hold the device still";
+  } else if (strcmp(s.mode, "CAL") == 0) {
+    strcpy(big, "CALIBRATING"); bigCol = topCanvas.color565(255, 140, 0); small = "leave the room";
+  } else if (present) {
+    snprintf(big, sizeof(big), "MOTION %d%%", (int)lroundf(s.motion * 100));
+    bigCol = topCanvas.color565(255, 120, 255); small = "distance unknown (Wi-Fi only)";
+  } else {
+    strcpy(big, "CLEAR"); bigCol = topCanvas.color565(0, 120, 150);
+  }
+  topCanvas.setTextSize(2);
+  topCanvas.setTextColor(bigCol);
+  topCanvas.drawString(big, (W - topCanvas.textWidth(big)) / 2, 58);
+  if (small) {
+    topCanvas.setTextSize(1);
+    topCanvas.setTextColor(topCanvas.color565(200, 160, 216));
+    topCanvas.drawString(small, (W - topCanvas.textWidth(small)) / 2, 82);
   }
 
-  // --- layer 4.5a: camera blip icons (amber, stationary) ---
-  for (int i = 0; i < 8; i++) {
-    if (!camBlips[i].active) continue;
-    if (now - camBlips[i].lastSeen > CAM_LIFE) { camBlips[i].active = false; continue; }
-    int bx = cx + (int)(camBlips[i].rad * cosf(camBlips[i].ang + BEAR));
-    int by = cy + (int)(camBlips[i].rad * sinf(camBlips[i].ang + BEAR));
-    drawCamIcon(bx, by);
-  }
+  // --- the Cardputer at the apex ---
+  topCanvas.fillRoundRect(apexX - 8, apexY - 3, 16, 6, 1, cCyan);
 
-  // --- layer 4.5: sonar ping ripples (white flash → cyan fade) ---
-  for (int r = 0; r < 6; ++r) {
-    if (!ripples[r].active) continue;
-    uint32_t age = now - ripples[r].birth;
-    if (age > 700) { ripples[r].active = false; continue; }
-    float prog = (float)age / 700.0f;
-    int bx = cx + (int)(ripples[r].rad * cosf(ripples[r].ang + BEAR));
-    int by = cy + (int)(ripples[r].rad * sinf(ripples[r].ang + BEAR));
-    int sz   = 4 + (int)(prog * 22.0f);
-    uint8_t fade = (uint8_t)(255 * (1.0f - prog));
-    uint8_t rc   = (uint8_t)(fade * (1.0f - prog));
-    topCanvas.drawCircle(bx, by, sz,     topCanvas.color565(rc, fade, fade));
-    topCanvas.drawCircle(bx, by, sz + 3, topCanvas.color565(rc / 3, fade / 3, fade / 3));
-  }
-
-  // --- layer 5: sweep leading edge ---
-  topCanvas.drawLine(cx, cy, cx + (int)(R * cosf(sweep + BEAR)), cy + (int)(R * sinf(sweep + BEAR)),
-                     topCanvas.color565(255, 80, 255));
-
-  // --- layer 6: title bar ---
+  // --- title bar: battery + range | contact state | mode pill ---
+  topCanvas.setTextSize(1);
   topCanvas.fillRect(0, 0, W, 14, cBar);
   topCanvas.drawFastHLine(0, 13, W, cBorder);
-  topCanvas.setTextSize(1);
-  const char* title = "[ WiFi-CSI RADAR ]";
-  topCanvas.setTextColor(cMag, cBar);
-  topCanvas.drawString(title, (W - topCanvas.textWidth(title)) / 2, 3);
   drawBatIcon(topCanvas, 2, 3);
-#if defined(RADAR_CSI)
-  const char* modeStr = wifiReady ? "WiFi OK" : "No WiFi";
-  topCanvas.setTextColor(wifiReady ? topCanvas.color565(0, 210, 80) : TFT_RED, cBar);
-#else
-  const char* modeStr = !linkOk ? "NO LINK" : s.mode;
-  topCanvas.setTextColor(!linkOk ? TFT_RED : cCyan, cBar);
-#endif
-  topCanvas.drawString(modeStr, W - topCanvas.textWidth(modeStr) - 4, 3);
-
-  // --- layer 7: status bar ---
-  topCanvas.fillRect(0, H - 14, W, 14, cBar);
-  topCanvas.drawFastHLine(0, H - 14, W, cBorder);
-  const char* ctlbl = present ? ">>CONTACT<<" : " scanning.. ";
-  uint16_t ctCol = present
-    ? (blink ? topCanvas.color565(255, 60, 255) : topCanvas.color565(110, 0, 100))
-    : topCanvas.color565(55, 0, 70);
-  topCanvas.setTextColor(ctCol, cBar);
-  topCanvas.drawString(ctlbl, 14, H - 11);
-  // center: bearing when contact active, threshold otherwise
-  char midStr[14];
-  if (present) snprintf(midStr, sizeof(midStr), "BRG:%03.0f", gLastBrg);
-  else         snprintf(midStr, sizeof(midStr), "T:%d%%",     (int)(gThreshold * 100));
-  topCanvas.setTextColor(present ? topCanvas.color565(255, 140, 60) : topCanvas.color565(100, 0, 110), cBar);
-  topCanvas.drawString(midStr, (W - topCanvas.textWidth(midStr)) / 2, H - 11);
-  char stats[28];
-  snprintf(stats, sizeof(stats), "C:%d M:%d%% %ddBm", contacts, (int)(s.motion * 100), s.rssi);
   topCanvas.setTextColor(cCyan, cBar);
-  topCanvas.drawString(stats, W - topCanvas.textWidth(stats) - 4, H - 11);
+  topCanvas.drawString(gRange10 ? "RANGE 10m" : "RANGE 5m", 18, 3);
+  const char* title = present ? "[ CONTACT ]" : "[ CLEAR ]";
+  bool blink = (now % 600) < 300;
+  topCanvas.setTextColor(present ? (blink ? topCanvas.color565(255, 60, 255) : cMag) : cMag, cBar);
+  topCanvas.drawString(title, (W - topCanvas.textWidth(title)) / 2, 3);
+  const char* tag = !linkOk ? "NO LINK" : s.mode;
+  uint16_t pill = (!linkOk || strcmp(s.mode, "NO CSI") == 0) ? TFT_RED
+                : ((strcmp(s.mode, "CAL") == 0 || strcmp(s.mode, "MOVED") == 0)
+                   ? topCanvas.color565(255, 140, 0) : topCanvas.color565(0, 180, 80));
+  int tw = topCanvas.textWidth(tag) + 8;
+  topCanvas.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
+  topCanvas.setTextColor(TFT_WHITE, pill);
+  topCanvas.drawString(tag, W - tw + 1, 3);
 
-  // --- layer 8: outer frame + corners ---
-  topCanvas.drawFastHLine(0,   0,   W, cBorder);
-  topCanvas.drawFastHLine(0,   H-1, W, cBorder);
-  topCanvas.drawFastVLine(0,   0,   H, cBorder);
-  topCanvas.drawFastVLine(W-1, 0,   H, cBorder);
-  const uint16_t cCorner = topCanvas.color565(255, 120, 255);
-  topCanvas.fillRect(0,   0,   2, 2, cCorner);
-  topCanvas.fillRect(W-2, 0,   2, 2, cCorner);
-  topCanvas.fillRect(0,   H-2, 2, 2, cCorner);
-  topCanvas.fillRect(W-2, H-2, 2, 2, cCorner);
+  // --- footer corners ---
+  char stats[24];
+  snprintf(stats, sizeof(stats), "M:%d%% %ddBm", (int)lroundf(s.motion * 100), s.rssi);
+  topCanvas.setTextColor(cCyan);
+  topCanvas.drawString(stats, 4, H - 10);
+  const char* hint = "[r] 5m/10m";
+  topCanvas.setTextColor(topCanvas.color565(154, 106, 168));
+  topCanvas.drawString(hint, W - topCanvas.textWidth(hint) - 4, H - 10);
+
+  // --- outer frame ---
+  topCanvas.drawRect(0, 0, W, H, cBorder);
 
   // scale-to-fit onto the 320x240 TFT (240x180 * EXT_ZOOM = 320x240, no letterbox)
   applyExtBrightness();
@@ -1939,6 +1825,7 @@ static void serviceKeys() {
     } else {
       if      (c == '`')             { gMenuOpen = true; gMenuCursor = 0; }
       else if (c == '.')             gViewMode = (gViewMode + 1) % 2;
+      else if (c == 'r' || c == 'R') { gRange10 = !gRange10; saveSettings(); }
 #if defined(RADAR_CSI)
       else if (c == 'c' || c == 'C') startCsiCal();
       else if (c == 'x' || c == 'X') { gCalPhase = 0; gCalibrated = false; }   // back to auto mode

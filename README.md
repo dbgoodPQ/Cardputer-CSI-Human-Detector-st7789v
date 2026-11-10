@@ -27,6 +27,7 @@ Licensed MIT, same as the original.
 | CSI processing | mean raw amplitude + mean phase over all bytes; affected by the receiver's automatic gain changes | L-LTF data subcarriers only (52, present in every frame type), each frame divided by its mean amplitude to cancel gain changes; motion = per-subcarrier variance over a 0.5 s window |
 | Motion scale | self-adjusting min/max: noise got stretched toward 100% in an empty room, and long motion faded into the baseline | measured against a reference: the empty-room calibration (`RUN`), or before calibration a slowly tracked quiet floor (`AUTO`) |
 | Device-motion guard | moving or bumping the Cardputer showed up as false contacts | the built-in IMU (BMI270) detects when the Cardputer itself moves: sensing pauses (`MOVED`, banner `DEVICE MOVED`) until it has been still for 2 s. A bump keeps the calibration; a real relocation (tilt change over 5° or more than 1.5 s of movement) drops it and asks you to press `c` again (`MOVED:PRESS C`) |
+| External screen view | round PPI radar scope; contact position (random angle, RSSI radius) did not reflect reality | **range cone**: the Cardputer at the apex, distance lines every 1 m up to 5 m, or every 2 m up to 10 m (key `r`, remembered). Motion lights up the whole cone, brighter with more motion, labelled `MOTION xx%`, because Wi-Fi sensing can't measure distance. Distance dots will come with the planned LD2410 mmWave radar. The 3D view (`.`) is unchanged |
 | Status | | `NO CSI` (red) when no router frames arrive; router frames per second shown on the bottom screen footer; sensing restarts on its own after a Wi-Fi reconnect |
 | Calibration (`c`) | sent `CAL` to an external sensor board that the on-device CSI build doesn't have, so nothing happened | on-device empty-room calibration: 3 s to leave the room, 10 s measurement (countdown on the bottom screen), then motion is measured against that baseline. `x` returns to `AUTO`. Not saved across reboots: recalibrate after moving the device |
 | Threshold (`,` `/`) | changed the on-screen value only; detection used a fixed 0.15 | sets the real detection threshold (default 0.15, as before), saved across reboots |
@@ -75,6 +76,8 @@ On first boot it scans for networks and asks for the password, as in the origina
 |-----|--------|
 | `c` | Calibrate: leave the room within 3 s, keep the device still for 10 s. `c` again cancels |
 | `x` | Drop the calibration, back to `AUTO` |
+| `r` | Range cone scale: 5 m (1 m lines) / 10 m (2 m lines) |
+| `.` | Switch the external screen between the range cone and the 3D view |
 | `,` | Decrease detection threshold (5% steps) |
 | `/` | Increase detection threshold (5% steps) |
 | `` ` `` | Open settings menu (EXT PANEL = external backlight) |
@@ -85,8 +88,7 @@ On first boot it scans for networks and asks for the password, as in the origina
 
 The Cardputer measures how the Wi-Fi signal from your router changes as it travels through the room.
 It detects **motion**, best when someone moves between the Cardputer and the router, within a few
-metres. It can't locate people: a contact's angle on the scope is random and its distance follows the
-router's signal strength, so the scope position is illustrative. Someone sitting perfectly still stays
+metres. It can't locate people, so the range cone shows *that* there is motion and how strong, not where. Someone sitting perfectly still stays
 on the scope for about 10 s after their last movement, then disappears. Through-wall sensing is weak.
 
 ## Usage tips

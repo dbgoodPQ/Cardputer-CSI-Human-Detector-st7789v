@@ -21,8 +21,8 @@ Information (CSI). Realistic target: on-device **presence + motion**.
     blips — radius from RSSI, size/heat from motion).
   - Bottom = built-in 1.14" (240x135): WiFi IP, status pill, PRESENCE/CLEAR
     banner, scrolling motion graph, threshold + key hints.
-- **No router needed:** S3 is the AP; Cardputer connects directly to it.
-  The Cardputer's own WiFi traffic generates the CSI frames the S3 measures.
+- **No router needed (UART/UDP builds only):** S3 is the AP; Cardputer connects
+  directly to it. The on-device CSI build uses the home router instead.
 
 ## On-device CSI pipeline (`cardputer-radar-csi`, ST7789V fork)
 - `csiCallback` keeps only frames whose `info->mac` == router BSSID, queues the
@@ -39,6 +39,8 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 - Cardputer → S3: `CAL` | `CALSTOP` | `THR <float>` | `RATE <hz>` | `PING`→`PONG`
 
 ## Build / run
+- `pio run -e cardputer-radar-csi -t upload` — **on-device CSI** (main build
+  of this fork; what CI builds).
 - `pio run -e cardputer-radar -t upload` — **fake-data mode** (`RADAR_FAKE=1`),
   no sensor needed.
 - `pio run -e cardputer-radar-wifi -t upload` — live WiFi UDP mode; S3 must be
@@ -70,23 +72,37 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 - `tools/fake_c5/fake_c5.ino` — spare-S3 UART protocol emitter.
 
 ## Status
-✅ Dual-screen UI, parser, link layer, history, radar scope — working on real
-CSI data over WiFi UDP. S3 runs as AP (`SQUACHNET`), Cardputer connects and
-receives frames. Stable contact blips with EMA smoothing.
-⚠️ `kScale=25.0f` in sensor_s3 needs tuning with real motion data.
+✅ **On-device CSI build (`cardputer-radar-csi`) is the main target of this fork.**
+Cardputer ADV joins the home Wi-Fi (picker on first boot, creds in prefs
+`wificreds`), senses motion from router frames only, drives both screens.
+User-tested: detection clearly better after the rework (router-only CSI,
+50 Hz gateway ping, AGC-normalised L-LTF shape variance, calibration).
+✅ External Waveshare 2" ST7789V working (pinout confirmed by user).
+✅ CI: `.github/workflows/build.yml` builds on push/PR/manual and uploads
+`cardputer-csi-st7789v.bin` (merged, flash at 0x0); `release.yml` on `v*` tags.
+⚠️ Libraries pinned: `M5GFX@0.2.36`, `M5Unified@0.2.29`, `M5Cardputer@1.1.1`.
+M5GFX 0.3.0's board detection probes G5/G6 (= external CS/DC) and misdetects
+the ADV (rotated internal screen, dead external screen). Don't unpin without
+re-testing on hardware.
+⚠️ Tuning constants are first estimates, not yet tuned on real data:
+`kCsiSpan`=4, `kAutoMargin`=2, `kCsiWin`=25, hold `kHold`=150 (10 s),
+default threshold 0.15.
+ℹ️ Blip angle is random and radius follows router RSSI: scope position is
+illustrative only. Spycam icons = OUI match on sniffed MACs (many false
+positives: ESP32, Amazon, Realtek are generic).
+ℹ️ The UART/UDP builds (`cardputer-radar`, `cardputer-radar-wifi`) and
+`tools/sensor_s3` are inherited from the original and untouched by this fork.
 
 ## Next steps (priority order)
-1. **Tune `kScale`** in `sensor_s3.ino`: the variance normalization constant
-   (currently 25.0f) was guessed. Real motion data may need a different value
-   to spread the motion range across 0.0–1.0 meaningfully.
-2. **Port sensor to ESP32-C5** (MonsterC5): better CSI PHY (Wi-Fi 6), but
-   `wifi_csi_acquire_config_t` is different — missing fields like `lltf_en`,
-   `sig_mode`, `secondary_channel`, `ant`. Prototype on S3 first, then port.
-3. **Calibration wizard:** `c` triggers empty-room training; scope shows a
-   distinct CALIBRATING state; bottom shows progress.
-4. **Real bearing** via a 2nd antenna (RSSI/phase delta) → blip angle becomes
-   meaningful, turning the scope into an actual direction finder.
+1. **Tune on real data:** log `gCsiMetric`, ref and motion over Serial while
+   walking in/out, then set `kCsiSpan` / `kAutoMargin` / default threshold.
+2. **Persist calibration** per BSSID in prefs (currently lost on reboot).
+3. **Bearing / distance:** not possible with one antenna; keep scope honest or
+   explore a 2nd receiver (C5) for RSSI/phase deltas.
+4. **Spycam icons:** show vendor name next to icon, add a setting to hide them.
 5. **Presence event log** on the bottom screen with optional SD persistence.
+6. **Port sensing to ESP32-C5** (MonsterC5) later: different
+   `wifi_csi_acquire_config_t` (no `lltf_en`, `sig_mode`, ...).
 
 ## Hardware inventory (chip cheat-sheet)
 - C5 (best CSI): MonsterC5, AWOK Dual Touch (2x each), Marauder v8.

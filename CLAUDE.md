@@ -101,8 +101,7 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 - `include/ext_panel.h` — external ST7789V panel class (`LGFX_ExtST7789`).
 - `include/node_proto.h`, `include/zones_core.h`, `include/zones_ui.h` — sensor
   nodes (see above). `tools/node_esp32/` — node firmware (PlatformIO, esp32dev).
-- `tools/sensor_s3/` — S3 CSI sensor firmware (AP mode, UDP broadcast).
-- `tools/fake_c5/fake_c5.ino` — spare-S3 UART protocol emitter.
+- (`tools/sensor_s3/`, `tools/fake_c5/` from the original's notes are not in this repo.)
 
 ## Status
 ✅ **On-device CSI build (`cardputer-radar-csi`) is the main target of this fork.**

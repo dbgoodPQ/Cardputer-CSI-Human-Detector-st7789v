@@ -97,6 +97,81 @@ static uint32_t gCalT0     = 0;
 static uint32_t gCalFailMs = 0;             // shows "CAL FAILED" briefly
 static uint32_t gCalOkMs   = 0;             // shows "CALIBRATED" briefly
 
+// ── Device-motion guard (built-in BMI270 IMU) ─────────────────────────────────
+// Moving the Cardputer changes the Wi-Fi channel far more than a person does.
+// While the IMU sees the device move (and for kSettleMs after), sensing pauses:
+// no contacts, the CSI window is flushed, the AUTO floor is frozen. A bump keeps
+// the calibration; a real relocation (orientation change or long movement)
+// drops it, because the empty-room baseline no longer matches the new spot.
+static bool     gImuOk        = false;
+static float    gGrav[3]      = {0.0f, 0.0f, 1.0f};  // slow-tracked gravity (g)
+static float    gGravStill[3] = {0.0f, 0.0f, 1.0f};  // gravity at the last still spot
+static bool     gImuMoving    = false;               // guard active
+static uint32_t gImuMoveT0    = 0;                   // first movement sample
+static uint32_t gImuMoveMs    = 0;                   // last movement sample
+static uint32_t gRelocMs      = 0;                   // shows "MOVED: PRESS C"
+static const float    kGyroThr  = 6.0f;    // deg/s
+static const float    kAccThr   = 0.05f;   // g, deviation from gravity
+static const uint32_t kSettleMs = 2000;    // still time before sensing resumes
+static const float    kRelocDeg = 5.0f;    // tilt change => new spot
+static const uint32_t kRelocMs  = 1500;    // moving this long => new spot
+
+static void initImu() {
+    gImuOk = M5.Imu.isEnabled();
+    if (gImuOk) {
+        M5.Imu.update();
+        const auto& d = M5.Imu.getImuData();
+        for (int i = 0; i < 3; i++) gGrav[i] = gGravStill[i] = d.accel.value[i];
+    }
+    Serial.printf("# IMU motion guard: %s\n", gImuOk ? "on" : "no IMU found, disabled");
+}
+
+// Samples the IMU at 50 Hz. Returns true while the device moves or settles.
+static bool serviceImu(uint32_t now) {
+    if (!gImuOk) return false;
+    static uint32_t last = 0;
+    if (now - last >= 20) {
+        last = now;
+        M5.Imu.update();
+        const auto& d = M5.Imu.getImuData();
+        const float* a = d.accel.value;
+        const float* g = d.gyro.value;
+        float gyro = sqrtf(g[0]*g[0] + g[1]*g[1] + g[2]*g[2]);
+        float dx = a[0] - gGrav[0], dy = a[1] - gGrav[1], dz = a[2] - gGrav[2];
+        float dev = sqrtf(dx*dx + dy*dy + dz*dz);
+        bool moving = gyro > kGyroThr || dev > kAccThr;
+        float k = moving ? 0.2f : 0.05f;
+        for (int i = 0; i < 3; i++) gGrav[i] += (a[i] - gGrav[i]) * k;
+        if (moving) {
+            if (!gImuMoving) { gImuMoving = true; gImuMoveT0 = now; }
+            gImuMoveMs = now;
+        }
+    }
+    if (gImuMoving && now - gImuMoveMs >= kSettleMs) {
+        gImuMoving = false;
+        float dot = 0.0f, n1 = 0.0f, n2 = 0.0f;
+        for (int i = 0; i < 3; i++) {
+            dot += gGrav[i] * gGravStill[i];
+            n1  += gGrav[i] * gGrav[i];
+            n2  += gGravStill[i] * gGravStill[i];
+        }
+        float c = (n1 > 0.0f && n2 > 0.0f) ? dot / sqrtf(n1 * n2) : 1.0f;
+        if (c > 1.0f) c = 1.0f;
+        if (c < -1.0f) c = -1.0f;
+        float tilt = acosf(c) * 57.29578f;
+        bool reloc = tilt > kRelocDeg || (gImuMoveMs - gImuMoveT0) > kRelocMs;
+        for (int i = 0; i < 3; i++) gGravStill[i] = gGrav[i];
+        Serial.printf("# IMU still again: tilt %.1f deg, moved %lu ms -> %s\n", tilt,
+                      (unsigned long)(gImuMoveMs - gImuMoveT0), reloc ? "new spot" : "bump");
+        if (reloc) {
+            if (gCalibrated) { gCalibrated = false; gRelocMs = now; }
+            gFloor = 0.0f;                       // AUTO re-learns the quiet level
+        }
+        return false;
+    }
+    return gImuMoving;
+}
+
 static void IRAM_ATTR promiscuousRxCb(void*, wifi_promiscuous_pkt_type_t) {}
 
 // WiFi task context: filter + copy only, the maths runs in loop().
@@ -705,7 +780,9 @@ static void serviceCsi() {
     }
     if (!wifiReady) return;
 
+    const bool guard = serviceImu(now);  // device moving / settling
     drainCsi(now);                       // every loop: keep the queue empty
+    if (guard) gWinFill = 0;             // flush frames taken while moving
     if (now - last < 66) return;         // UI frames at 15 Hz
     last = now;
 
@@ -715,7 +792,8 @@ static void serviceCsi() {
         rateT0   = now;
     }
 
-    const bool haveCsi = gWinFill >= kCsiWin && gLastPktMs && (now - gLastPktMs) < 2000;
+    const bool pktsOk  = gLastPktMs && (now - gLastPktMs) < 2000;
+    const bool haveCsi = pktsOk && !guard && gWinFill >= kCsiWin;   // window warm
     float raw = 0.0f;
     if (haveCsi) {
         // AUTO floor: falls fast, rises very slowly (~90 s), so it settles on the quiet level.
@@ -730,6 +808,15 @@ static void serviceCsi() {
     gCsiMotion += (raw - gCsiMotion) * 0.4f;
 
     char line[48];
+    if (guard) {
+        // Device moving: no contacts; a running calibration restarts its lead-in.
+        holdCnt = 0; heldMotion = 0.0f; gCsiMotion = 0.0f;
+        if (gCalPhase) { gCalPhase = 1; gCalT0 = now; }
+        snprintf(line, sizeof(line), "R,%lu,0,0.000,%d,MOVED",
+                 (unsigned long)(++seq), (int)gCsiRssi);
+        radar.injectLine(line);
+        return;
+    }
     if (stepCsiCal(now, haveCsi)) {
         // No contacts while learning the empty room.
         holdCnt = 0; heldMotion = 0.0f;
@@ -738,7 +825,7 @@ static void serviceCsi() {
         radar.injectLine(line);
         return;
     }
-    if (!haveCsi) {
+    if (!pktsOk) {
         // Connected but no router frames (router ignores ping / starting up)
         holdCnt = 0; heldMotion = 0.0f;
         snprintf(line, sizeof(line), "R,%lu,0,0.000,%d,NO CSI",
@@ -908,7 +995,8 @@ static void drawBottom() {
   const char* tag  = !linkOk ? "NO LINK" : (calib ? "CAL" : s.mode);
   const bool  noCsi = linkOk && strcmp(s.mode, "NO CSI") == 0;
   uint16_t    pill = (!linkOk || noCsi) ? TFT_RED
-                   : (calib ? canvas.color565(255, 140, 0) : canvas.color565(0, 180, 80));
+                   : ((calib || strcmp(s.mode, "MOVED") == 0) ? canvas.color565(255, 140, 0)
+                                                                : canvas.color565(0, 180, 80));
   int tw = canvas.textWidth(tag) + 8;
   canvas.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
   canvas.setTextColor(TFT_WHITE, pill);
@@ -924,7 +1012,9 @@ static void drawBottom() {
 #if defined(RADAR_CSI)
   char calLbl[20];
   const uint32_t nowMs = millis();
-  if (gCalPhase == 1) {
+  if (gImuMoving) {
+    lbl = "DEVICE MOVED";
+  } else if (gCalPhase == 1) {
     snprintf(calLbl, sizeof(calLbl), "LEAVE ROOM %lu",
              (unsigned long)((kCalLeadMs - (nowMs - gCalT0) + 999) / 1000));
     lbl = calLbl;
@@ -936,6 +1026,8 @@ static void drawBottom() {
     lbl = "CAL FAILED";
   } else if (gCalOkMs && nowMs - gCalOkMs < 2000) {
     lbl = "CALIBRATED";
+  } else if (gRelocMs && nowMs - gRelocMs < 4000) {
+    lbl = "MOVED:PRESS C";
   }
 #endif
   canvas.setTextColor(present ? canvas.color565(255, 100, 255) : cCyan, bg);
@@ -1900,6 +1992,7 @@ void setup() {
 #endif
 
 #if defined(RADAR_CSI)
+  initImu();
   initCsi();
 #elif defined(RADAR_UDP)
   initWiFi();

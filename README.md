@@ -26,6 +26,7 @@ Licensed MIT, same as the original.
 | CSI traffic | whatever traffic happened to be on the air | the Cardputer pings the gateway 50x per second, so the router sends a steady stream of frames to measure |
 | CSI processing | mean raw amplitude + mean phase over all bytes; affected by the receiver's automatic gain changes | L-LTF data subcarriers only (52, present in every frame type), each frame divided by its mean amplitude to cancel gain changes; motion = per-subcarrier variance over a 0.5 s window |
 | Motion scale | self-adjusting min/max: noise got stretched toward 100% in an empty room, and long motion faded into the baseline | measured against a reference: the empty-room calibration (`RUN`), or before calibration a slowly tracked quiet floor (`AUTO`) |
+| Device-motion guard | moving or bumping the Cardputer showed up as false contacts | the built-in IMU (BMI270) detects when the Cardputer itself moves: sensing pauses (`MOVED`, banner `DEVICE MOVED`) until it has been still for 2 s. A bump keeps the calibration; a real relocation (tilt change over 5° or more than 1.5 s of movement) drops it and asks you to press `c` again (`MOVED:PRESS C`) |
 | Status | | `NO CSI` (red) when no router frames arrive; router frames per second shown on the bottom screen footer; sensing restarts on its own after a Wi-Fi reconnect |
 | Calibration (`c`) | sent `CAL` to an external sensor board that the on-device CSI build doesn't have, so nothing happened | on-device empty-room calibration: 3 s to leave the room, 10 s measurement (countdown on the bottom screen), then motion is measured against that baseline. `x` returns to `AUTO`. Not saved across reboots: recalibrate after moving the device |
 | Threshold (`,` `/`) | changed the on-screen value only; detection used a fixed 0.15 | sets the real detection threshold (default 0.15, as before), saved across reboots |
@@ -94,8 +95,12 @@ on the scope for about 10 s after their last movement, then disappears. Through-
   The router should be in or near the room, with the area you want to watch between the two.
 - The footer shows router frames per second (`.../s`); around 50 is ideal. Below ~15 detection is
   unreliable and calibration fails.
-- The status pill shows `AUTO` (uncalibrated), `CAL` (calibrating), `RUN` (calibrated) or
+- The status pill shows `AUTO` (uncalibrated), `CAL` (calibrating), `RUN` (calibrated),
+  `MOVED` (the Cardputer itself is moving; sensing paused) or
   `NO CSI` (no router frames: the router may be ignoring pings, or it is still starting up).
+- Moving the Cardputer to a new spot drops the calibration on purpose: recalibrate there.
+  It doesn't recalibrate by itself, because you're usually still in the room right after moving it.
+- If you pick it up during calibration, the countdown restarts once it is still again.
 - Calibrate (`c`) once the device is in place. `CAL FAILED` means too few router frames or Wi-Fi dropped.
 - After calibrating, an empty room should sit near 0% motion. If you get false contacts, raise the
   threshold with `/`; if you're missed, lower it with `,`.

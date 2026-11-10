@@ -31,7 +31,11 @@ Information (CSI). Realistic target: on-device **presence + motion**.
   (AGC cancel); `gCsiMetric` = mean per-subcarrier variance over `kCsiWin`=25 frames.
 - `serviceCsi` (15 Hz): motion = (metric/ref - 1)/`kCsiSpan`; ref = `gCalRef`
   (empty-room mean+3sd, key c) or `kAutoMargin` x slow floor (AUTO). Modes:
-  AUTO | CAL | RUN | NO CSI. Threshold `gThreshold` (, /), saved in prefs.
+  AUTO | CAL | RUN | MOVED | NO CSI. Threshold `gThreshold` (, /), saved in prefs.
+- IMU guard (`serviceImu`, BMI270 via M5.Imu on In_I2C, 50 Hz): gyro > 6 dps or
+  |accel - gravity| > 0.05 g => MOVED, CSI window flushed, floor frozen, until
+  2 s still. Tilt > 5 deg or > 1.5 s of movement = relocation => calibration
+  dropped (user must press c; no auto-recal, the user is usually in the room).
 
 ## Wire protocol (UDP port 4210, newline-terminated ASCII, ~15 Hz)
 - S3 → Cardputer: `R,<seq>,<presence 0|1>,<motion 0.000-1.000>,<rssi>,<mode>`
@@ -84,9 +88,10 @@ User-tested: detection clearly better after the rework (router-only CSI,
 M5GFX 0.3.0's board detection probes G5/G6 (= external CS/DC) and misdetects
 the ADV (rotated internal screen, dead external screen). Don't unpin without
 re-testing on hardware.
+✅ IMU device-motion guard (pauses sensing while the Cardputer moves).
 ⚠️ Tuning constants are first estimates, not yet tuned on real data:
 `kCsiSpan`=4, `kAutoMargin`=2, `kCsiWin`=25, hold `kHold`=150 (10 s),
-default threshold 0.15.
+default threshold 0.15, IMU thresholds 6 dps / 0.05 g / 2 s settle.
 ℹ️ Blip angle is random and radius follows router RSSI: scope position is
 illustrative only. Spycam icons = OUI match on sniffed MACs (many false
 positives: ESP32, Amazon, Realtek are generic).
@@ -100,8 +105,12 @@ positives: ESP32, Amazon, Realtek are generic).
 3. **Bearing / distance:** not possible with one antenna; keep scope honest or
    explore a 2nd receiver (C5) for RSSI/phase deltas.
 4. **Spycam icons:** show vendor name next to icon, add a setting to hide them.
-5. **Presence event log** on the bottom screen with optional SD persistence.
-6. **Port sensing to ESP32-C5** (MonsterC5) later: different
+5. **TODO (user request, later): add mmWave radar HLK-LD2410** (24 GHz, UART,
+   5 V) on the Grove port (G1/G2 = Serial1). Detects still people (breathing
+   micro-motion) + distance gates; fuse with CSI (contact if either is
+   confident, distance from the radar). Grove can do UART *or* I2C, not both.
+6. **Presence event log** on the bottom screen with optional SD persistence.
+7. **Port sensing to ESP32-C5** (MonsterC5) later: different
    `wifi_csi_acquire_config_t` (no `lltf_en`, `sig_mode`, ...).
 
 ## Hardware inventory (chip cheat-sheet)

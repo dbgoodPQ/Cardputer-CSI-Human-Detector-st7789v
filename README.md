@@ -78,6 +78,7 @@ On first boot it scans for networks and asks for the password, as in the origina
 | `c` | Calibrate the Cardputer and every node: leave within 3 s, keep everything still for 10 s. `c` again cancels |
 | `x` | Drop the calibration (Cardputer and nodes), back to `AUTO` |
 | `r` | Range cone scale: 5 m (1 m lines) / 10 m (2 m lines) |
+| `n` | Range cone zone: ME → each node → AUTO (follows the zone with the strongest motion) → ME. Shows the cone first if another view is open |
 | `.` | External screen view: range cone → zones → 3D view |
 | `,` | Decrease detection threshold (5% steps, applies to the nodes too) |
 | `/` | Increase detection threshold (5% steps, applies to the nodes too) |
@@ -139,6 +140,8 @@ mode. A freshly paired node that can't join the Wi-Fi within 60 s also returns t
 router sees little. Nodes need USB power (about 100–150 mA each).
 
 **On screen:**
+- External screen, range cone: `n` picks which zone it shows (name at the top left), or **AUTO**,
+  which follows the zone with the strongest motion and stays on it until another one is clearly stronger.
 - External screen, **ZONES** view (`.`): one row per zone, `ME` first. Magenta = motion above the
   threshold, `OFFLINE` when a node hasn't reported for 10 s.
 - Cardputer screen: the banner names the most active zone (`>> KITCHEN <<`), chips show every zone

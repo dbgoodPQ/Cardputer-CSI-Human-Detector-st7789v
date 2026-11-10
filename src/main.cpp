@@ -1738,10 +1738,24 @@ static uint16_t blend565(uint16_t bg, uint16_t fg, float a) {
 
 static void drawTop() {
   if (!extReady) return;
+  const uint32_t now     = millis();
+#if defined(RADAR_CSI)
+  // The cone shows one zone: ME (this Cardputer), a node, or AUTO (key n).
+  const int      coneZ   = coneZoneNow(now);
+  const ZoneView zv      = getZone(coneZ, now);
+  const bool     linkOk  = zv.online;
+  const bool     present = zv.present;
+  const float    zMotion = zv.motion;
+  const int      zRssi   = zv.rssi;
+  const char*    zMode   = zv.mode;
+#else
   const auto& s = radar.state();
   const bool     linkOk  = !radar.stale(750);
   const bool     present = linkOk && s.presence;
-  const uint32_t now     = millis();
+  const float    zMotion = s.motion;
+  const int      zRssi   = s.rssi;
+  const char*    zMode   = s.mode;
+#endif
 
   const int W = topCanvas.width();   // 240 (x1.333 on the panel)
   const int H = topCanvas.height();  // 180
@@ -1758,7 +1772,7 @@ static void drawTop() {
   topCanvas.fillSprite(TFT_BLACK);
 
   // --- cone, row by row: background + motion glow (strong near the device) ---
-  const float glow = present ? s.motion : 0.0f;
+  const float glow = present ? zMotion : 0.0f;
   for (int y = topY; y <= apexY; ++y) {
     int hw = halfTop * (apexY - y) / coneH;
     float depth = (float)(apexY - y) / coneH;           // 0 at the device, 1 at full range
@@ -1785,15 +1799,20 @@ static void drawTop() {
   const char* small = nullptr;
   uint16_t bigCol = cCyan;
   if (!linkOk) {
-    strcpy(big, "NO LINK"); bigCol = TFT_RED;
-  } else if (strcmp(s.mode, "NO CSI") == 0) {
+#if defined(RADAR_CSI)
+    if (coneZ > 0) { strcpy(big, "OFFLINE"); small = "no report from this node"; }
+    else
+#endif
+    strcpy(big, "NO LINK");
+    bigCol = TFT_RED;
+  } else if (strcmp(zMode, "NO CSI") == 0) {
     strcpy(big, "NO SIGNAL"); bigCol = TFT_RED; small = "no router frames";
-  } else if (strcmp(s.mode, "MOVED") == 0) {
+  } else if (strcmp(zMode, "MOVED") == 0) {
     strcpy(big, "MOVED"); bigCol = topCanvas.color565(255, 140, 0); small = "hold the device still";
-  } else if (strcmp(s.mode, "CAL") == 0) {
+  } else if (strcmp(zMode, "CAL") == 0) {
     strcpy(big, "CALIBRATING"); bigCol = topCanvas.color565(255, 140, 0); small = "leave the room";
   } else if (present) {
-    snprintf(big, sizeof(big), "MOTION %d%%", (int)lroundf(s.motion * 100));
+    snprintf(big, sizeof(big), "MOTION %d%%", (int)lroundf(zMotion * 100));
     bigCol = topCanvas.color565(255, 120, 255); small = "distance unknown (Wi-Fi only)";
   } else {
     strcpy(big, "CLEAR"); bigCol = topCanvas.color565(0, 120, 150);
@@ -1816,14 +1835,22 @@ static void drawTop() {
   topCanvas.drawFastHLine(0, 13, W, cBorder);
   drawBatIcon(topCanvas, 2, 3);
   topCanvas.setTextColor(cCyan, cBar);
+#if defined(RADAR_CSI)
+  topCanvas.drawString(zv.name, 18, 3);              // which zone (range is on the lines)
+#else
   topCanvas.drawString(gRange10 ? "RANGE 10m" : "RANGE 5m", 18, 3);
+#endif
   const char* title = present ? "[ CONTACT ]" : "[ CLEAR ]";
   bool blink = (now % 600) < 300;
   topCanvas.setTextColor(present ? (blink ? topCanvas.color565(255, 60, 255) : cMag) : cMag, cBar);
   topCanvas.drawString(title, (W - topCanvas.textWidth(title)) / 2, 3);
-  const char* tag = !linkOk ? "NO LINK" : s.mode;
-  uint16_t pill = (!linkOk || strcmp(s.mode, "NO CSI") == 0) ? TFT_RED
-                : ((strcmp(s.mode, "CAL") == 0 || strcmp(s.mode, "MOVED") == 0)
+#if defined(RADAR_CSI)
+  const char* tag = !linkOk ? (coneZ > 0 ? "OFFLINE" : "NO LINK") : zMode;
+#else
+  const char* tag = !linkOk ? "NO LINK" : zMode;
+#endif
+  uint16_t pill = (!linkOk || strcmp(zMode, "NO CSI") == 0) ? TFT_RED
+                : ((strcmp(zMode, "CAL") == 0 || strcmp(zMode, "MOVED") == 0)
                    ? topCanvas.color565(255, 140, 0) : topCanvas.color565(0, 180, 80));
   int tw = topCanvas.textWidth(tag) + 8;
   topCanvas.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
@@ -1832,10 +1859,15 @@ static void drawTop() {
 
   // --- footer corners ---
   char stats[24];
-  snprintf(stats, sizeof(stats), "M:%d%% %ddBm", (int)lroundf(s.motion * 100), s.rssi);
+  snprintf(stats, sizeof(stats), "M:%d%% %ddBm", (int)lroundf(zMotion * 100), zRssi);
   topCanvas.setTextColor(cCyan);
   topCanvas.drawString(stats, 4, H - 10);
+#if defined(RADAR_CSI)
+  const char* hint = gNodeCount == 0 ? "[r] 5m/10m"
+                   : (coneAuto() ? "[n] AUTO [r] 5m/10m" : "[n] zone [r] 5m/10m");
+#else
   const char* hint = "[r] 5m/10m";
+#endif
   topCanvas.setTextColor(topCanvas.color565(154, 106, 168));
   topCanvas.drawString(hint, W - topCanvas.textWidth(hint) - 4, H - 10);
 
@@ -1881,6 +1913,12 @@ static void serviceKeys() {
       else if (c == '.')             gViewMode = (gViewMode + 1) % 2;
 #endif
       else if (c == 'r' || c == 'R') { gRange10 = !gRange10; saveSettings(); }
+#if defined(RADAR_CSI)
+      else if (c == 'n' || c == 'N') {                // cone: next zone (ME, nodes, AUTO)
+        if (gViewMode != 0) gViewMode = 0;            // first press just shows the cone
+        else coneNext();
+      }
+#endif
 #if defined(RADAR_CSI)
       else if (c == 'c' || c == 'C') {
         const bool cancel = gCalPhase != 0;

@@ -336,6 +336,33 @@ static bool pairSendCreds(const uint8_t mac[6]) {
     return esp_now_send(mac, (const uint8_t*)&msg, sizeof(msg)) == ESP_OK;
 }
 
+// ── which zone the range cone shows (key n): 0 = ME, 1..n = node, n+1 = AUTO ──
+static int gConeSel  = 0;
+static int gAutoZone = 0;      // zone AUTO currently follows (sticky, avoids flicker)
+
+static bool coneAuto() { return gNodeCount > 0 && gConeSel > gNodeCount; }
+
+static void coneNext() {
+    if (gNodeCount == 0) { gConeSel = 0; return; }
+    gConeSel = (gConeSel > gNodeCount) ? 0 : gConeSel + 1;   // ME, nodes..., AUTO, ME
+}
+
+// Zone to draw now. AUTO follows the strongest zone with motion and keeps it
+// until another one is clearly stronger (+10%) or it goes clear; when every
+// zone is clear it stays on the last one shown.
+static int coneZoneNow(uint32_t now) {
+    if (gNodeCount == 0) { gConeSel = 0; return 0; }
+    if (!coneAuto()) return gConeSel;
+    if (gAutoZone >= zoneCount()) gAutoZone = 0;
+    ZoneView cur = getZone(gAutoZone, now);
+    const int act = activeZone(now);
+    if (act >= 0 && act != gAutoZone) {
+        ZoneView best = getZone(act, now);
+        if (!cur.present || best.motion > cur.motion + 0.10f) gAutoZone = act;
+    }
+    return gAutoZone;
+}
+
 // ── bottom screen: one chip per zone (magenta = motion, outline = clear, grey = offline)
 static void drawZoneChips(int y, uint32_t now) {
     const int n = zoneCount();

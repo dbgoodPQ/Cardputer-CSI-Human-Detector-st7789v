@@ -4,8 +4,9 @@ A fork of [**skizzophrenic/Cardputer-CSI-Human-Detector**](https://github.com/sk
 that swaps the external 2.8" ILI9341 screen for a **Waveshare 2inch LCD module (ST7789V, 240x320, IPS)**.
 
 **All credit for the project goes to the original author** (TalkingSasquach / skizzophrenic): the
-Wi-Fi CSI sensing, the radar scope, the raycaster view, the UI and everything else. This fork only
-changes the external display driver. For what the device does and how it works, read the
+Wi-Fi CSI sensing concept, the radar scope, the raycaster view, the UI and everything else. This fork
+changes the external display driver and reworks the on-device CSI signal processing (see below).
+For the project's background, read the
 [original README](https://github.com/skizzophrenic/Cardputer-CSI-Human-Detector#readme).
 Licensed MIT, same as the original.
 
@@ -21,12 +22,17 @@ Licensed MIT, same as the original.
 | Backlight | BL wired to 5V; EXT PANEL brightness dimmed by scaling every pixel of the frame | BL on **G4** with PWM; EXT PANEL brightness sets the real backlight. Pixel dimming kept as an option (`-DEXT_SOFT_DIM=1`) if BL is wired to 3V3 instead |
 | Pins | defined inline | same pins, now `EXT_TFT_*` macros (overridable with `-D` flags) |
 | Libraries | `M5Unified@^0.2.11` (now resolves to M5GFX 0.3.0) | pinned `M5GFX@0.2.36`, `M5Unified@0.2.29`, `M5Cardputer@1.1.1`: M5GFX 0.3.0's board detection probes G5/G6 (external CS/DC) and misdetects the Cardputer ADV |
-| Calibration (`c`) | sent `CAL` to an external sensor board that the on-device CSI build doesn't have, so nothing happened | on-device empty-room calibration: 3 s to leave the room, 10 s measurement (countdown on the bottom screen), then motion is measured against that baseline. `x` returns to the original self-adjusting mode. Not saved across reboots: recalibrate after moving the device |
+| CSI sources | CSI from every frame on the channel (router, phones, neighbours' devices), so the measurement mostly reflected which device transmitted | only frames sent by the router the Cardputer is connected to (matched by BSSID) |
+| CSI traffic | whatever traffic happened to be on the air | the Cardputer pings the gateway 50x per second, so the router sends a steady stream of frames to measure |
+| CSI processing | mean raw amplitude + mean phase over all bytes; affected by the receiver's automatic gain changes | L-LTF data subcarriers only (52, present in every frame type), each frame divided by its mean amplitude to cancel gain changes; motion = per-subcarrier variance over a 0.5 s window |
+| Motion scale | self-adjusting min/max: noise got stretched toward 100% in an empty room, and long motion faded into the baseline | measured against a reference: the empty-room calibration (`RUN`), or before calibration a slowly tracked quiet floor (`AUTO`) |
+| Status | | `NO CSI` (red) when no router frames arrive; router frames per second shown on the bottom screen footer; sensing restarts on its own after a Wi-Fi reconnect |
+| Calibration (`c`) | sent `CAL` to an external sensor board that the on-device CSI build doesn't have, so nothing happened | on-device empty-room calibration: 3 s to leave the room, 10 s measurement (countdown on the bottom screen), then motion is measured against that baseline. `x` returns to `AUTO`. Not saved across reboots: recalibrate after moving the device |
 | Threshold (`,` `/`) | changed the on-screen value only; detection used a fixed 0.15 | sets the real detection threshold (default 0.15, as before), saved across reboots |
 | CI | release workflow on `v*` tags | adds **Build firmware** workflow: builds on every push / PR / manual run and uploads the `.bin` as an artifact. Release asset renamed `cardputer-csi-st7789v-<tag>.bin` |
 | Docs | | this README; `CLAUDE.md` updated for the new panel |
 
-Unchanged: CSI signal processing, UI, rendering (240x180 canvas zoomed to 320x240), SPI bus (SPI2_HOST shared
+Unchanged: UI, rendering (240x180 canvas zoomed to 320x240), SPI bus (SPI2_HOST shared
 with the SD card, 27 MHz), keyboard controls, settings, partitions, build environment.
 
 ---
@@ -67,19 +73,32 @@ On first boot it scans for networks and asks for the password, as in the origina
 | Key | Action |
 |-----|--------|
 | `c` | Calibrate: leave the room within 3 s, keep the device still for 10 s. `c` again cancels |
-| `x` | Drop the calibration, back to the original auto mode |
+| `x` | Drop the calibration, back to `AUTO` |
 | `,` | Decrease detection threshold (5% steps) |
 | `/` | Increase detection threshold (5% steps) |
 | `` ` `` | Open settings menu (EXT PANEL = external backlight) |
 
 ---
 
-## Calibration tips
+## What it can and can't do
+
+The Cardputer measures how the Wi-Fi signal from your router changes as it travels through the room.
+It detects **motion**, best when someone moves between the Cardputer and the router, within a few
+metres. It can't locate people: a contact's angle on the scope is random and its distance follows the
+router's signal strength, so the scope position is illustrative. Someone sitting perfectly still stays
+on the scope for about 10 s after their last movement, then disappears. Through-wall sensing is weak.
+
+## Usage tips
 
 - Put the Cardputer down where it will stay; moving it changes the signal far more than a person does.
-- The status pill shows `AUTO` (uncalibrated), `CAL` (calibrating) or `RUN` (calibrated).
-- `CAL FAILED` means too few Wi-Fi frames were received (low network traffic) or Wi-Fi dropped.
-- After calibrating, an empty room should sit near 0% motion. If you get false contacts, raise the threshold with `/`; if you're missed, lower it with `,`.
+  The router should be in or near the room, with the area you want to watch between the two.
+- The footer shows router frames per second (`.../s`); around 50 is ideal. Below ~15 detection is
+  unreliable and calibration fails.
+- The status pill shows `AUTO` (uncalibrated), `CAL` (calibrating), `RUN` (calibrated) or
+  `NO CSI` (no router frames: the router may be ignoring pings, or it is still starting up).
+- Calibrate (`c`) once the device is in place. `CAL FAILED` means too few router frames or Wi-Fi dropped.
+- After calibrating, an empty room should sit near 0% motion. If you get false contacts, raise the
+  threshold with `/`; if you're missed, lower it with `,`.
 
 ---
 
@@ -88,6 +107,8 @@ On first boot it scans for networks and asks for the password, as in the origina
 - **Picture upside down:** build with `-DEXT_ROTATION=3` (add it to `build_flags` in `platformio.ini`).
 - **Colours inverted (black looks white):** set `cfg.invert = false` in `include/ext_panel.h`.
 - **Red and blue swapped:** set `cfg.rgb_order = true` in `include/ext_panel.h`.
+- **`NO CSI` all the time:** the router doesn't answer ping (some block ICMP from clients, or guest
+  networks isolate clients). Try another network or enable ping replies on the router.
 - **Screen stays dark:** check BL on G4; or wire BL to 3V3 and build with `-DEXT_SOFT_DIM=1`.
 
 ST7789V settings follow the working Cardputer + Waveshare 2inch setup in

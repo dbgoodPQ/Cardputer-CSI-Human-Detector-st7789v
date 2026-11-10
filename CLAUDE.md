@@ -24,6 +24,15 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 - **No router needed:** S3 is the AP; Cardputer connects directly to it.
   The Cardputer's own WiFi traffic generates the CSI frames the S3 measures.
 
+## On-device CSI pipeline (`cardputer-radar-csi`, ST7789V fork)
+- `csiCallback` keeps only frames whose `info->mac` == router BSSID, queues the
+  first 128 bytes (L-LTF). `startPing()` pings the gateway at 50 Hz (esp_ping).
+- `processCsiPkt`: 52 data subcarriers (1..26, 38..63), divided by their mean
+  (AGC cancel); `gCsiMetric` = mean per-subcarrier variance over `kCsiWin`=25 frames.
+- `serviceCsi` (15 Hz): motion = (metric/ref - 1)/`kCsiSpan`; ref = `gCalRef`
+  (empty-room mean+3sd, key c) or `kAutoMargin` x slow floor (AUTO). Modes:
+  AUTO | CAL | RUN | NO CSI. Threshold `gThreshold` (, /), saved in prefs.
+
 ## Wire protocol (UDP port 4210, newline-terminated ASCII, ~15 Hz)
 - S3 → Cardputer: `R,<seq>,<presence 0|1>,<motion 0.000-1.000>,<rssi>,<mode>`
   - e.g. `R,1042,1,0.37,-54,RUN`  (mode = CAL | RUN | IDLE)

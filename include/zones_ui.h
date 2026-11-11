@@ -1,4 +1,4 @@
-// Zones UI — included ONCE from src/main.cpp (RADAR_CSI build only), just before
+// Zones UI — included ONCE from src/main.cpp, just before
 // setup(). External-screen ZONES view, and the NODES menu (list, one node,
 // add node / pairing). Design: claude.ai Design canvas "Sensor Nodes Screens".
 #ifndef ZONES_UI_H
@@ -11,14 +11,13 @@ static void drawZones();
 
 static void drawExternalView() {
     if (!extReady) return;
-    if (gViewMode == 0)      drawTop();
-    else if (gViewMode == 1) drawZones();
-    else                     drawRaycaster();
+    if (gViewMode == 0) drawTop();
+    else                drawZones();
 }
 
 // Keeps everything running while a blocking menu screen is open.
-static void uiBackground(bool sensing) {
-    if (sensing) { serviceCsi(); serviceCam(); }
+static void uiBackground() {
+    serviceWifi();
     serviceNodes();
     static uint32_t lastTop = 0;
     uint32_t now = millis();
@@ -92,7 +91,6 @@ static const char* zoneStatus(const ZoneView& v, char* buf, size_t n, uint16_t& 
     if (!v.online)                       { col = uiCol(255, 80, 80);  return "OFFLINE"; }
     if (strcmp(v.mode, "NO CSI") == 0)   { col = uiCol(255, 80, 80);  return "NO SIGNAL"; }
     if (strcmp(v.mode, "CAL") == 0)      { col = uiCol(255, 140, 0);  return "CAL"; }
-    if (strcmp(v.mode, "MOVED") == 0)    { col = uiCol(255, 140, 0);  return "MOVED"; }
     if (v.present) {
         snprintf(buf, n, "MOTION %d%%", (int)lroundf(v.motion * 100));
         col = uiCol(255, 120, 255);
@@ -107,10 +105,8 @@ static const char* zoneStatus(const ZoneView& v, char* buf, size_t n, uint16_t& 
 // ══════════════════════════════════════════════════════════════════════════════
 static void drawZones() {
     if (!extReady) return;
-    const auto& s = radar.state();
     const uint32_t now = millis();
     const int W = topCanvas.width(), H = topCanvas.height();
-    const bool linkOk = !radar.stale(750);
     const int  act = activeZone(now);
 
     const uint16_t cBar    = topCanvas.color565(20, 0, 35);
@@ -129,10 +125,11 @@ static void drawZones() {
     const char* title = act >= 0 ? "[ CONTACT ]" : "[ CLEAR ]";
     topCanvas.setTextColor(gColA, cBar);
     topCanvas.drawString(title, (W - topCanvas.textWidth(title)) / 2, 3);
-    const char* tag = !linkOk ? "NO LINK" : s.mode;
-    uint16_t pill = (!linkOk || strcmp(s.mode, "NO CSI") == 0) ? TFT_RED
-                  : ((strcmp(s.mode, "CAL") == 0 || strcmp(s.mode, "MOVED") == 0)
-                     ? topCanvas.color565(255, 140, 0) : topCanvas.color565(0, 180, 80));
+    char tb[12];
+    int  lvl;
+    const char* tag = nodesTag(now, tb, sizeof(tb), lvl);
+    uint16_t pill = lvl == 2 ? TFT_RED
+                  : (lvl == 1 ? topCanvas.color565(255, 140, 0) : topCanvas.color565(0, 180, 80));
     int tw = topCanvas.textWidth(tag) + 8;
     topCanvas.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
     topCanvas.setTextColor(TFT_WHITE, pill);
@@ -162,8 +159,7 @@ static void drawZones() {
 
         if (tall) {
             char sub[32], age[12];
-            if (z == 0)                         snprintf(sub, sizeof(sub), "this Cardputer %ddBm %u/s", v.rssi, (unsigned)v.rate);
-            else if (!v.online && gLive[z-1].lastMs) { fmtAge(now - gLive[z-1].lastMs, age, sizeof(age)); snprintf(sub, sizeof(sub), "no report for %s", age); }
+            if (!v.online && gLive[z].lastMs) { fmtAge(now - gLive[z].lastMs, age, sizeof(age)); snprintf(sub, sizeof(sub), "no report for %s", age); }
             else if (!v.online)                 snprintf(sub, sizeof(sub), "never reported");
             else if (!v.present && v.lastMotionMs) { fmtAge(now - v.lastMotionMs, age, sizeof(age)); snprintf(sub, sizeof(sub), "last motion %s ago", age); }
             else                                snprintf(sub, sizeof(sub), "%ddBm  %u/s", v.rssi, (unsigned)v.rate);
@@ -230,7 +226,7 @@ static bool runNameInput(const char* title, char* name) {
     uint32_t lastDraw = 0, msgUntil = 0;
     const char* msg = nullptr;
     for (;;) {
-        uiBackground(true);
+        uiBackground();
         int c = uiKey();
         if (c == '`') return false;
         if (c == '\n') {
@@ -265,7 +261,7 @@ static bool runNameInput(const char* title, char* name) {
 // Small confirm / info screen. Returns true on enter.
 static bool runConfirm(const char* title, const char* l1, const char* l2, const char* footer) {
     for (;;) {
-        uiBackground(true);
+        uiBackground();
         int c = uiKey();
         if (c == '\n') return true;
         if (c == '`')  return false;
@@ -283,7 +279,7 @@ static void runNodeEdit(int idx) {
     char msg[40] = "";
     for (;;) {
         if (idx < 0 || idx >= gNodeCount) return;
-        uiBackground(true);
+        uiBackground();
         int c = uiKey();
         if (c == '`') return;
         if (c == ';') cursor = (cursor + 2) % 3;
@@ -317,7 +313,7 @@ static void runNodeEdit(int idx) {
         char title[24];
         snprintf(title, sizeof(title), ">> %s <<", gNodes[idx].name);
         uiFrame(title, ";/.:nav  enter:select  `:back");
-        ZoneView v = getZone(idx + 1, now);
+        ZoneView v = getZone(idx, now);
         const uint16_t cLbl = uiCol(138, 138, 138);
         char line[40];
         canvas.setTextColor(cLbl); canvas.drawString("ID", 8, 18);
@@ -405,7 +401,6 @@ static void runAddNode() {
                     if (st == SEARCH || memcmp(e.mac, target, 6) == 0) pairSendSeen(e.mac);
                 } else if (e.type == nodeproto::PAIR_OK && st == SENDING && memcmp(e.mac, target, 6) == 0) {
                     targetIdx = upsertNode(target, name);
-                    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
                     pairStop();
                     st = JOINING; tState = now;
                     Serial.printf("# node %s paired\n", name);
@@ -425,21 +420,17 @@ static void runAddNode() {
             if (lastSend == 0 || now - lastSend >= 700) { pairSendCreds(target); lastSend = now; }
             if (now - tState > 6000) { st = FAILED; tState = now; }
         }
+        uiBackground();
         if (st == JOINING) {
-            uiBackground(true);
             if (targetIdx >= 0 && gLive[targetIdx].lastMs > tState) { st = DONE; tState = now; }
             else if (now - tState > 45000) { st = NOREPORT; tState = now; }
-        } else if (st == DONE || st == NOREPORT) {
-            uiBackground(true);
-        } else {
-            uiBackground(false);
         }
 
         // keys
         int c = uiKey();
         if (c) {
             if (st == SEARCH) {
-                if (c == '`') { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); pairStop(); return; }
+                if (c == '`') { pairStop(); return; }
                 if (c == '\t' && nFound > 1) { sel = (sel + 1) % nFound; prefillName(); }
                 else if (c == '\n') {
                     trimName(name);
@@ -452,7 +443,7 @@ static void runAddNode() {
                 if (c == '`') st = SEARCH;
             } else if (st == FAILED) {
                 if (c == '\n') st = SEARCH;
-                else if (c == '`') { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); pairStop(); return; }
+                else if (c == '`') { pairStop(); return; }
             } else if (st == JOINING) {
                 if (c == '`') return;                       // node is saved; it shows up when it reports
             } else {                                        // DONE / NOREPORT
@@ -556,7 +547,7 @@ static void runNodesMenu() {
     uint32_t lastDraw = 0;
     const int rowH = 20, visRows = 5;
     for (;;) {
-        uiBackground(true);
+        uiBackground();
         const int items = gNodeCount + (gNodeCount < kMaxNodes ? 1 : 0);
         if (cursor >= items) cursor = items - 1;
         if (cursor < 0) cursor = 0;
@@ -587,7 +578,7 @@ static void runNodesMenu() {
             canvas.setTextColor(sel ? gColA : uiCol(4, 0, 8));
             canvas.drawString(">", 4, y + 6);
             if (i < gNodeCount) {
-                ZoneView v = getZone(i + 1, now);
+                ZoneView v = getZone(i, now);
                 if (!v.online)      canvas.fillCircle(19, y + 9, 3, uiCol(90, 90, 90));
                 else if (v.present) canvas.fillCircle(19, y + 9, 3, gColA);
                 else                canvas.drawCircle(19, y + 9, 3, gColB);

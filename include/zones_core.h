@@ -1,7 +1,7 @@
-// Zones core — included ONCE from src/main.cpp (RADAR_CSI build only), after the
-// CSI pipeline. Holds the paired sensor nodes, their live reports (UDP), the
-// commands sent to them, ESP-NOW pairing plumbing and the zone helpers the
-// screens use. Zone 0 is always "ME" (the Cardputer's own CSI sensing).
+// Zones core — included ONCE from src/main.cpp, after the Wi-Fi code.
+// Holds the paired sensor nodes, their live reports (UDP), the commands sent to
+// them, ESP-NOW pairing plumbing and the zone helpers the screens use.
+// v2: the Cardputer does no sensing itself, so zone i == node i (no "ME" zone).
 #ifndef ZONES_CORE_H
 #define ZONES_CORE_H
 
@@ -30,12 +30,11 @@ struct NodeLive {                // runtime only
 static NodeCfg  gNodes[kMaxNodes];
 static NodeLive gLive[kMaxNodes];
 static int      gNodeCount = 0;
-static uint32_t gMeLastMotionMs = 0;
 
 static WiFiUDP  gNodeUdp;
 static bool     gNodeUdpOn = false;
 
-// strongest zone over time (bottom-screen graph when nodes exist), 15 Hz
+// strongest zone over time (bottom-screen graph), 15 Hz
 static const int kZoneHist = 240;
 static float    gZoneHist[kZoneHist];
 static int      gZoneHistHead = 0;
@@ -154,7 +153,7 @@ static bool nodeOnline(int i, uint32_t now) {
     return i >= 0 && i < gNodeCount && gLive[i].lastMs && (now - gLive[i].lastMs) < kNodeOfflineMs;
 }
 
-// ── zones (0 = ME, 1.. = nodes) ──────────────────────────────────────────────
+// ── zones (one per node) ──────────────────────────────────────────────
 struct ZoneView {
     const char* name;
     bool        online;
@@ -166,23 +165,11 @@ struct ZoneView {
     const char* mode;
 };
 
-static int zoneCount() { return 1 + gNodeCount; }
+static int zoneCount() { return gNodeCount; }
 
 static ZoneView getZone(int z, uint32_t now) {
     ZoneView v{};
-    if (z == 0) {
-        const auto& s = radar.state();
-        v.name = "ME";
-        v.online = !radar.stale(750);
-        v.present = v.online && s.presence;
-        v.motion = v.online ? s.motion : 0.0f;
-        v.rssi = s.rssi;
-        v.rate = gPktRate;
-        v.lastMotionMs = gMeLastMotionMs;
-        v.mode = s.mode;
-        return v;
-    }
-    int i = z - 1;
+    const int i = z;
     v.name = gNodes[i].name;
     v.online = nodeOnline(i, now);
     v.present = v.online && gLive[i].presence;
@@ -211,6 +198,30 @@ static int activeZone(uint32_t now, float* maxMotion = nullptr, int* maxZone = n
 
 static bool anyZonePresent(uint32_t now) { return activeZone(now) >= 0; }
 
+static int onlineNodeCount(uint32_t now) {
+    int n = 0;
+    for (int i = 0; i < gNodeCount; i++) if (nodeOnline(i, now)) n++;
+    return n;
+}
+
+// True while any online node reports calibration mode.
+static bool anyNodeCalibrating(uint32_t now) {
+    for (int i = 0; i < gNodeCount; i++)
+        if (nodeOnline(i, now) && strcmp(gLive[i].mode, "CAL") == 0) return true;
+    return false;
+}
+
+// Status pill for the title bars: "2/3 ON". level 0 = all online (green),
+// 1 = some offline or calibrating (orange), 2 = none online / no Wi-Fi / no nodes (red).
+static const char* nodesTag(uint32_t now, char* buf, size_t n, int& level) {
+    if (!wifiReady)      { level = 2; return "NO WIFI"; }
+    if (gNodeCount == 0) { level = 2; return "NO NODES"; }
+    const int on = onlineNodeCount(now);
+    snprintf(buf, n, "%d/%d ON", on, gNodeCount);
+    level = on == 0 ? 2 : ((on < gNodeCount || anyNodeCalibrating(now)) ? 1 : 0);
+    return buf;
+}
+
 static float zoneHistAt(int idx) { return gZoneHist[(gZoneHistHead + idx) % kZoneHist]; }
 
 // Called every loop (and from the nodes screens).
@@ -238,8 +249,6 @@ static void serviceNodes() {
         static uint32_t lastThr = 0;
         if (now - lastThr >= 5000) { lastThr = now; sendNodeThreshold(); }   // nodes that rebooted
     }
-    if (!radar.stale(750) && radar.state().presence) gMeLastMotionMs = now;
-
     static uint32_t lastHist = 0;
     if (now - lastHist >= 66) {
         lastHist = now;
@@ -248,16 +257,6 @@ static void serviceNodes() {
         gZoneHist[gZoneHistHead] = m;
         gZoneHistHead = (gZoneHistHead + 1) % kZoneHist;
     }
-}
-
-// ── pause / resume the Cardputer's own sensing (ESP-NOW pairing) ─────────────
-static void pauseCsi() {
-    stopPing();
-    esp_wifi_set_csi(false);
-    esp_wifi_set_promiscuous(false);
-}
-static void resumeCsi() {
-    if (wifiReady && WiFi.status() == WL_CONNECTED) enableCsi();
 }
 
 // ── ESP-NOW pairing plumbing ─────────────────────────────────────────────────
@@ -301,7 +300,6 @@ static void pairAddPeer(const uint8_t mac[6]) {
 }
 
 static bool pairStart() {
-    pauseCsi();
     gPairEvtR = gPairEvtW = 0;
     gEspNowOn = esp_now_init() == ESP_OK;
     if (gEspNowOn) esp_now_register_recv_cb(pairRecv);
@@ -310,7 +308,7 @@ static bool pairStart() {
 
 static void pairStop() {
     if (gEspNowOn) { esp_now_unregister_recv_cb(); esp_now_deinit(); gEspNowOn = false; }
-    resumeCsi();
+    esp_wifi_set_ps(WIFI_PS_NONE);   // console default (see onWifiUp)
 }
 
 static void pairSendSeen(const uint8_t mac[6]) {
@@ -336,22 +334,22 @@ static bool pairSendCreds(const uint8_t mac[6]) {
     return esp_now_send(mac, (const uint8_t*)&msg, sizeof(msg)) == ESP_OK;
 }
 
-// ── which zone the range cone shows (key n): 0 = ME, 1..n = node, n+1 = AUTO ──
-static int gConeSel  = 0;
-static int gAutoZone = 0;      // zone AUTO currently follows (sticky, avoids flicker)
+// ── which zone the range cone shows (key n): 0..n-1 = node, >= n = AUTO ──────
+static int gConeSel  = kMaxNodes;  // start in AUTO
+static int gAutoZone = 0;          // zone AUTO currently follows (sticky, avoids flicker)
 
-static bool coneAuto() { return gNodeCount > 0 && gConeSel > gNodeCount; }
+static bool coneAuto() { return gNodeCount > 0 && gConeSel >= gNodeCount; }
 
 static void coneNext() {
-    if (gNodeCount == 0) { gConeSel = 0; return; }
-    gConeSel = (gConeSel > gNodeCount) ? 0 : gConeSel + 1;   // ME, nodes..., AUTO, ME
+    if (gNodeCount == 0) return;
+    gConeSel = coneAuto() ? 0 : gConeSel + 1;   // nodes..., AUTO, first node
 }
 
 // Zone to draw now. AUTO follows the strongest zone with motion and keeps it
 // until another one is clearly stronger (+10%) or it goes clear; when every
 // zone is clear it stays on the last one shown.
 static int coneZoneNow(uint32_t now) {
-    if (gNodeCount == 0) { gConeSel = 0; return 0; }
+    if (gNodeCount == 0) return -1;
     if (!coneAuto()) return gConeSel;
     if (gAutoZone >= zoneCount()) gAutoZone = 0;
     ZoneView cur = getZone(gAutoZone, now);
@@ -366,6 +364,7 @@ static int coneZoneNow(uint32_t now) {
 // ── bottom screen: one chip per zone (magenta = motion, outline = clear, grey = offline)
 static void drawZoneChips(int y, uint32_t now) {
     const int n = zoneCount();
+    if (n == 0) return;
     const int W = canvas.width();
     const int gap = 2;
     const int cw = (W - 8 - (n - 1) * gap) / n;

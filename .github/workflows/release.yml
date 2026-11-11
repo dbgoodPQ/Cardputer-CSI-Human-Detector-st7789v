@@ -45,10 +45,17 @@ jobs:
             0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
             0x10000 $B/firmware.bin
 
+      - name: Fixed-name copies (stable releases/latest/download/... links)
+        run: |
+          cp cardputer-csi-st7789v-${{ github.ref_name }}.bin cardputer-csi-st7789v.bin
+          cp csi-node-esp32-${{ github.ref_name }}.bin csi-node-esp32.bin
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             cardputer-csi-st7789v-${{ github.ref_name }}.bin
             csi-node-esp32-${{ github.ref_name }}.bin
+            cardputer-csi-st7789v.bin
+            csi-node-esp32.bin
           generate_release_notes: true

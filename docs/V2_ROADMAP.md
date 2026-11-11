@@ -1,9 +1,9 @@
 # Version 2 roadmap
 
 Branch: `version2` (from `main` @ `1257b06`, which already contains the `nodes` work).
-Status: planning. Nothing below is implemented yet.
+Status: goal 1 done (not yet hardware-tested); goal 2 planning.
 
-## Goal 1: Cardputer becomes a console only
+## Goal 1: Cardputer becomes a console only (done)
 
 The Cardputer stops sensing. It manages nodes and shows the motion they report.
 
@@ -21,9 +21,8 @@ The Cardputer stops sensing. It manages nodes and shows the motion they report.
   nodes (4212), NODES menu, both screens.
 - Free up the CPU/RAM previously used by CSI. Possibly a smoother UI.
 
-Open questions:
-- Keep the legacy builds (`cardputer-radar`, `cardputer-radar-wifi`) or drop them in v2?
-- Should the Cardputer still need the home Wi-Fi, or could nodes report over ESP-NOW only?
+Decisions: legacy builds dropped; the Cardputer keeps joining the home Wi-Fi;
+3D view removed; IMU guard removed; build name `cardputer-radar-csi` kept.
 
 ## Goal 2: challenge and improve motion detection (nodes)
 

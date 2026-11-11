@@ -30,10 +30,15 @@
 #endif
 #define BOOT_PIN 0
 
-static const char* kFwVer = "2.0-dev";
+static const char* kFwVer = "2.0-dev2";
 
 static uint8_t gMyMac[6];
 static char    gMyHex[13];
+
+// Milliseconds from t to now, signed. Timestamps set by commands (millis()) can be
+// slightly newer than the loop's `now`; plain unsigned `now - t` then wraps to a
+// huge value and fires timeouts at once.
+static inline int32_t msSince(uint32_t now, uint32_t t) { return (int32_t)(now - t); }
 
 // ── LED + BOOT button ─────────────────────────────────────────────────────────
 static void ledSet(bool on) { digitalWrite(NODE_LED_PIN, on ? HIGH : LOW); }
@@ -222,7 +227,7 @@ static uint32_t gCatT0   = 0;
 
 static bool csiKindOk(const CsiPkt& pk, uint32_t now) {
     gCatCnt[pk.cat & 31]++;
-    if (now - gCatT0 >= 1000) {
+    if (msSince(now, gCatT0) >= 1000) {
         int best = -1; uint16_t bc = 0;
         for (int i = 0; i < 32; i++) if (gCatCnt[i] > bc) { bc = gCatCnt[i]; best = i; }
         const uint16_t cur = gLockCat >= 0 ? gCatCnt[gLockCat] : 0;
@@ -349,12 +354,12 @@ static void logPacket(const CsiPkt& pk, uint8_t status, uint32_t now) {
 
 static void serviceLog(uint32_t now) {
     if (!gLogPort) return;
-    if (now - gLogLastCmd > kLogTimeoutMs) {
+    if (msSince(now, gLogLastCmd) > (int32_t)kLogTimeoutMs) {
         Serial.println("# raw log: PC stopped refreshing, off");
         gLogN = 0; gLogPort = 0;
         return;
     }
-    if (gLogN && now - gLogFirstMs >= 100) logFlush();
+    if (gLogN && msSince(now, gLogFirstMs) >= 100) logFlush();
 }
 
 static void stopPing() {
@@ -433,14 +438,14 @@ static void startCal() {
 // Returns true while calibrating.
 static bool stepCal(uint32_t now, bool haveCsi) {
     if (gCalPhase == 1) {
-        if (now - gCalT0 < kCalLeadMs) return true;
+        if (msSince(now, gCalT0) < (int32_t)kCalLeadMs) return true;
         gCalPhase = 2; gCalT0 = now; gCalN = 0; gCalCsi0 = gCsiCount;
         gCalSum = gCalSq = 0;
         return true;
     }
     if (gCalPhase != 2) return false;
     (void)haveCsi;                                  // samples come from processCsiPkt
-    if (now - gCalT0 < kCalMeasMs) return true;
+    if (msSince(now, gCalT0) < (int32_t)kCalMeasMs) return true;
     gCalPhase = 0;
     const uint32_t frames = gCsiCount - gCalCsi0;
     if (frames < 80 || gCalN < 50) {

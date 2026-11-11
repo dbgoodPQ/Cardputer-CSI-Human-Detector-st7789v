@@ -52,7 +52,7 @@ room by room. Realistic target: **presence + motion** per room.
   ref (mean+3sd) or AUTO floor x2, 10 s hold. Modes AUTO | CAL | RUN | NO CSI; broadcasts `N,<mac>,<seq>,<pres>,<motion>,
   <rssi>,<rate>,<mode>` on UDP 4211 at 10 Hz. Cardputer → nodes UDP 4212:
   `C,CAL|CALSTOP|UNCAL|THR,<f>|BLINK,<mac>|FORGET,<mac>` (THR resent every 5 s).
-- Raw CSI logging (fw 2.0-dev): `C,LOG,<mac>,<port>` from a PC (keep-alive every
+- Raw CSI logging (fw 2.0-dev2; 2.0-dev had a timeout bug): `C,LOG,<mac>,<port>` from a PC (keep-alive every
   2 s, node stops after 6 s; port 0 = stop) → node streams every router CSI packet
   to sender IP:port as `CSIL` v1 datagrams (20 B header + up to 8 x 152 B records:
   radio ts, millis, v1 metric, rx_ctrl fields, status, frame kind, 128 B CSI).
@@ -73,8 +73,15 @@ room by room. Realistic target: **presence + motion** per room.
   v1; only build). CI output `cardputer-csi-st7789v.bin`, flash at 0x0.
 - `cd tools/node_esp32 && pio run -t upload` — sensor node. CI output `csi-node-esp32.bin`.
 - CI (`build.yml`) builds both on pushes to `main` and `version2`, PRs, manual runs.
+- Releases (`release.yml`, on `v*` tags; the user creates tags, this environment
+  can't push them): full images `*.bin` at 0x0 (erase NVS → nodes must re-pair)
+  and app-only `*-app.bin` at 0x10000 (keep Wi-Fi/pairing/settings). GitHub tends to
+  mark `-dev` tags as pre-release, so `releases/latest/download` may not resolve.
 
 ## Hard constraints (don't regress these)
+- Node timeouts: compare times with `msSince(now, t)` (signed). Commands set
+  timestamps with millis() after the loop's `now` was taken; unsigned `now - t`
+  wraps and fires at once (bug that killed raw logging in fw 2.0-dev).
 - Build sets `ARDUINO_USB_CDC_ON_BOOT=1` → **`Serial` is USB-C**. Any wired
   sensor (e.g. LD2410 on Grove) MUST use a HardwareSerial (`Serial1`), never `Serial`.
 - **No PSRAM** (StampS3). Don't allocate a full 320x240 sprite. Pattern: render

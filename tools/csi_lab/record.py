@@ -46,8 +46,35 @@ def discover(seconds: float) -> dict[str, tuple[str, str]]:
     return found
 
 
-def send_cmd(sock: socket.socket, ip: str, text: str) -> None:
-    sock.sendto((text + "\n").encode(), (ip, CMD_PORT))
+def send_cmd(sock: socket.socket, ip: str, text: str) -> str | None:
+    """Sends a command; returns an error text instead of raising (e.g. Wi-Fi drop)."""
+    try:
+        sock.sendto((text + "\n").encode(), (ip, CMD_PORT))
+        return None
+    except OSError as e:
+        return str(e)
+
+
+def local_ip_for(ip: str) -> str:
+    """The PC address Windows uses to reach ip (picks the right adapter)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((ip, CMD_PORT))
+        return s.getsockname()[0]
+    except OSError:
+        return "?"
+    finally:
+        s.close()
+
+
+NO_DATA_HINT = """
+  No packets yet. Likely causes:
+   - the node runs firmware 1.0 (its serial monitor shows the version at boot);
+     flash firmware 2.0-dev or newer;
+   - Windows Firewall blocks incoming UDP {port}, or the Wi-Fi profile is Public;
+   - the PC has several adapters (VPN, Ethernet, WSL): try --bind <PC IP on the nodes' network>.
+  With the node's serial monitor open you should see '# raw log: on -> <PC IP>:{port}'.
+"""
 
 
 def main() -> int:
@@ -61,6 +88,7 @@ def main() -> int:
     ap.add_argument("--countdown", type=int, default=10, help="seconds to get in place before recording")
     ap.add_argument("--port", type=int, default=4213, help="local UDP port for the stream")
     ap.add_argument("--out", default="recordings", help="output folder")
+    ap.add_argument("--bind", default="", help="PC IP address to use (when the PC has several adapters)")
     args = ap.parse_args()
 
     mac = csilog.norm_mac(args.node) if args.node else None
@@ -81,6 +109,7 @@ def main() -> int:
             print(f"Node {mac} not heard. Found: {', '.join(sorted(nodes)) or 'none'}")
             return 1
         ip = nodes[mac][0]
+        print(f"Node {mac} at {ip} (mode {nodes[mac][1]})")
     if not mac or not args.label:
         print("--node and --label are required to record (or give --ip with --node).")
         return 1
@@ -91,9 +120,12 @@ def main() -> int:
     path = out / f"{args.room}_{args.label}_{stamp}_{mac[-4:]}.csil"
 
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    rx.bind(("", args.port))
+    rx.bind((args.bind, args.port))
     rx.settimeout(0.2)
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    if args.bind:
+        tx.bind((args.bind, 0))
+    print(f"PC address towards the node: {args.bind or local_ip_for(ip)}, stream port {args.port}")
 
     for left in range(args.countdown, 0, -1):
         print(f"\rRecording '{args.label}' in {args.room} starts in {left:2d} s ", end="", flush=True)
@@ -113,6 +145,8 @@ def main() -> int:
     next_print = t0 + 1
     sec_recs = 0
     rssi_last = 0
+    send_err = None
+    hinted = False
     try:
         with open(path, "wb") as f:
             csilog.write_header(f, meta)
@@ -121,8 +155,16 @@ def main() -> int:
                 if now >= t_end:
                     break
                 if now >= next_cmd:
-                    send_cmd(tx, ip, f"C,LOG,{mac},{args.port}")
+                    err = send_cmd(tx, ip, f"C,LOG,{mac},{args.port}")
+                    if err and err != send_err:
+                        print(f"\n  network error, retrying: {err}")
+                    elif not err and send_err:
+                        print("\n  network back")
+                    send_err = err
                     next_cmd = now + REFRESH_S
+                if not hinted and n_recs == 0 and now - t0 > 8:
+                    print(NO_DATA_HINT.format(port=args.port))
+                    hinted = True
                 if now >= next_print:
                     el = now - t0
                     print(f"\r{el:6.0f}/{args.minutes*60:.0f} s  {sec_recs:3d} pkt/s  rssi {rssi_last:4d}  "
@@ -133,6 +175,9 @@ def main() -> int:
                 try:
                     data, _ = rx.recvfrom(4096)
                 except socket.timeout:
+                    continue
+                except OSError:          # e.g. WinError 10054 after an ICMP error; keep going
+                    time.sleep(0.2)
                     continue
                 p = csilog.parse_datagram(data)
                 if not p or p[0] != mac:

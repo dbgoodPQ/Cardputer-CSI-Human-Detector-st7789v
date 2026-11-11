@@ -50,6 +50,11 @@ jobs:
           cp cardputer-csi-st7789v-${{ github.ref_name }}.bin cardputer-csi-st7789v.bin
           cp csi-node-esp32-${{ github.ref_name }}.bin csi-node-esp32.bin
 
+      - name: App-only images (flash at 0x10000, keep saved Wi-Fi / pairing)
+        run: |
+          cp .pio/build/cardputer-radar-csi/firmware.bin cardputer-csi-st7789v-app.bin
+          cp tools/node_esp32/.pio/build/esp32-node/firmware.bin csi-node-esp32-app.bin
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -58,4 +63,11 @@ jobs:
             csi-node-esp32-${{ github.ref_name }}.bin
             cardputer-csi-st7789v.bin
             csi-node-esp32.bin
+            cardputer-csi-st7789v-app.bin
+            csi-node-esp32-app.bin
+          body: |
+            **Which file to flash**
+            - Update (keeps saved Wi-Fi, settings and pairing): `*-app.bin` at **0x10000**.
+            - New board or full reset (erases saved Wi-Fi; nodes must be paired again): `*.bin` at **0x0**.
+            - Cardputer ADV: `cardputer-csi-st7789v*`. Sensor nodes (ESP32-WROOM-32/32D): `csi-node-esp32*`.
           generate_release_notes: true

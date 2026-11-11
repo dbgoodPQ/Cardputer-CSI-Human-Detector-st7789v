@@ -9,8 +9,12 @@ offline, before changing the node firmware (v2 roadmap, phases 1 to 3).
   Today it has `v1`, an exact copy of the current node detector; the new one
   will be added next to it.
 
-Needs node firmware **2.0-dev or newer** (raw logging), Python 3.10+, and a PC on
-the same Wi-Fi network as the nodes.
+Needs node firmware **2.0-dev2 or newer** (raw logging; 2.0-dev switched logging
+off right away), Python 3.10+, and a PC on the same Wi-Fi network as the nodes.
+
+To update a node without pairing it again, flash `csi-node-esp32-app.bin` from the
+release at **0x10000**. The full `csi-node-esp32.bin` at 0x0 also erases the saved
+Wi-Fi details.
 
 ## Setup (once, PowerShell)
 
@@ -43,6 +47,11 @@ Labels:
 
 Suggested first set, **per room**: 2 x `empty`, 2 x `walk`, 1 x `still`, 5 minutes
 each, at different times of day if you can. Keep the node where it normally lives.
+
+If nothing arrives after 8 s, `record.py` prints the likely causes. Open the node's
+serial monitor (`python -m pip install pyserial`, then
+`python -m serial.tools.miniterm COM5 115200`): it should show
+`# raw log: on -> <PC IP>:4213`. With several network adapters, add `--bind <PC IP>`.
 
 Logging doesn't stop the node's normal sensing, and the node stops streaming on
 its own about 6 s after `record.py` exits.

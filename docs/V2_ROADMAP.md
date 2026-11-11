@@ -1,7 +1,7 @@
 # Version 2 roadmap
 
 Branch: `version2` (from `main` @ `1257b06`, which already contains the `nodes` work).
-Status: goal 1 done (not yet hardware-tested); goal 2 planning.
+Status: goal 1 done (not yet hardware-tested); goal 2 phase 1 (raw recording) done.
 
 ## Goal 1: Cardputer becomes a console only (done)
 
@@ -24,45 +24,56 @@ The Cardputer stops sensing. It manages nodes and shows the motion they report.
 Decisions: legacy builds dropped; the Cardputer keeps joining the home Wi-Fi;
 3D view removed; IMU guard removed; build name `cardputer-radar-csi` kept.
 
-## Goal 2: challenge and improve motion detection (nodes)
+## Goal 2: improve motion detection on the nodes
 
-Current method (v1): AGC-normalised amplitude of 52 L-LTF subcarriers,
-mean per-subcarrier variance over 25 frames, compared with an empty-room
-reference (mean + 3 sd) or an AUTO floor x 2. Constants are untuned estimates.
+### Comparison with ESPectre (Nov 2026)
 
-Weaknesses to challenge:
-- A single scalar (mean variance) mixes real motion with noise from AGC steps,
-  rate changes and interference. A single burst can trigger it.
-- The ref/floor model drifts (doors, furniture, the router changing channel or power).
-- No use of phase, and no use of the temporal correlation between subcarriers.
-- Thresholds are hand-picked, not measured.
+[ESPectre](https://github.com/francescopace/espectre) is a mature open-source
+ESP32 Wi-Fi motion sensor. Main differences with our v1 node method:
 
-Candidate improvements (to evaluate on logged data before choosing):
-1. **Data first:** add a raw logging mode on the node (CSI amplitude per frame over
-   Serial/UDP) and record empty / walking / sitting sessions per room. Tune and compare
-   offline (Python) before changing firmware.
-2. **Better features:**
-   - Correlation-based: 1 - correlation between consecutive (or lagged) CSI shapes.
-     This is robust to AGC scaling.
-   - PCA on the subcarrier matrix: variance of the first principal components after
-     removing the first (static) one.
-   - Doppler-like band power: energy in 0.3-5 Hz of the amplitude time series
-     (human motion band), rejecting slow drift and fast noise.
-   - Sanitised phase difference between adjacent subcarriers, if stable on the WROOM.
-3. **Outlier handling:** Hampel / median filter per subcarrier, and drop frames with
-   abnormal RSSI or AGC jumps.
-4. **Adaptive baseline:** a robust running baseline (median/MAD) that only updates when
-   no motion is detected. Persist calibration per node/BSSID.
-5. **Decision logic:** hysteresis (separate on/off thresholds) plus a short
-   "N of M windows" rule instead of a single threshold with a 10 s hold.
-6. **Multi-node fusion on the Cardputer:** zone confidence and cross-checks (motion seen
-   by one node vs. a global interference event seen by all at once).
-7. Later: ESP32-C5 nodes (better CSI PHY) behind the same node protocol.
+| | Our v1 node | ESPectre |
+|---|---|---|
+| Traffic | Router ping 50/s | Router ping 100/s by default; fixed TX rate (HT20 MCS0) on classic ESP32 |
+| Timing | Every packet as it comes; window = 25 packets; frame-kind lock | Fixed 10 ms slots (one packet each), 1 s windows in real time, ready at 70% filled slots |
+| Subcarriers | All 52, divided by their mean | 12 fixed, spread across the band |
+| Measure | Mean per-subcarrier variance of the normalised shape | Per packet: std/mean of the 12 (gain-invariant); per 1 s: lag-1 autocorrelation + IQR/mean of a neighbour-averaged version |
+| Outliers | None | Hampel filter |
+| Decision | metric / reference vs a hand-picked threshold, 10 s hold | Fixed-weight logistic fusion (or small MLP); 4 readings on / 3 off at 250 ms |
+| Threshold | Manual calibration (`c`) or 2x a slow floor | Automatic at boot (burst-tolerant), slow downward recovery |
+| Validation | Informal | Published dataset, per-chip reports |
+| Nodes | ESP-NOW pairing from the Cardputer, UDP reports, central console | Standalone devices: USB provisioning, mDNS, HTTP API + events, MQTT, Matter, OTA |
 
-Success criteria (to be agreed): detection rate when walking, false alarms per hour
-in an empty room, and latency to detect and to clear.
+**Decision: path B.** Keep our firmware, pairing and protocol, and reimplement the
+useful ideas ourselves. ESPectre is GPLv3 and this project is MIT, so we never copy
+its code or trained weights; methods are rewritten from their description and any
+weights are fitted on our own recordings.
+
+### Plan
+
+0. **Docs** (this section).
+1. **Raw CSI recording** (done in firmware 2.0-dev): `C,LOG,<mac>,<port>` streams
+   every router CSI packet to a PC; `tools/csi_lab/record.py` saves labelled
+   recordings and `replay.py` scores detectors on them (with an exact Python copy
+   of v1). Collect per room: 2 x empty, 2 x walk, 1 x still, 5 min each.
+2. **Steadier input:** ping 100/s, fixed TX rate HT20 MCS0, 10 ms time slots with
+   one packet each, 1 s windows in real time, ready at >= 70% filled slots. Keep the
+   frame-kind lock as a safety net.
+3. **New measure** (Python first, node only if it beats v1 on the recordings):
+   12 spread subcarriers, per-packet std/mean and a neighbour-averaged version,
+   Hampel (window 7), per 1 s window lag-1 autocorrelation and IQR/mean, combined
+   into a probability by a 3-parameter logistic model fitted on our data.
+4. **Decision and protocol:** evaluate every 250 ms, 4 on / 3 off; automatic
+   threshold at boot (burst-tolerant) with slow downward recovery, `c` as manual
+   recalibration; node report gains probability + state (old 8-field reports still
+   accepted); the 10 s "someone was here" hold moves to the Cardputer display.
+5. **Later:** signed reports and commands (per-network key sent at pairing; nodes
+   must be paired again once).
+
+Success criteria, measured with `replay.py` per room: walking detected > 95% of
+the time, empty-room false contact < 1% of the time and < 1 alarm per hour,
+contact within 1 s and clear within 1 s after motion stops (before the display hold).
 
 ## Protocol impact
-- Node → Cardputer `N,...` frame may gain fields (feature values, confidence,
-  baseline state). Bump a protocol version in `include/node_proto.h`.
-- New command for single-node calibration and for raw-log mode.
+- Node → Cardputer `N,...` report gains probability + state at the end (phase 4).
+- Raw logging: `C,LOG,<mac>,<port>` (port 0 = stop), binary `CSIL` datagrams v1 (phase 1, done).
+- Later: single-node calibration command; signed reports and commands.

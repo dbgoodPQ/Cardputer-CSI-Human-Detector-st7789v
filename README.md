@@ -170,6 +170,7 @@ router sees little. Nodes need USB power (about 100–150 mA each).
 **On screen:**
 - External screen, range cone: `n` picks which zone it shows (name at the top left), or **AUTO**,
   which follows the zone with the strongest motion and stays on it until another one is clearly stronger.
+  A badge at the bottom left says which mode is on: **AUTO** (filled) or **MANUAL** (outlined, zone picked with `n`).
 - External screen, **ZONES** view (`.`): one row per zone, `ME` first. Magenta = motion above the
   threshold, `OFFLINE` when a node hasn't reported for 10 s.
 - Cardputer screen: the banner names the most active zone (`>> KITCHEN <<`), chips show every zone

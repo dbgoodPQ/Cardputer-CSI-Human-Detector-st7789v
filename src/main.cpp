@@ -1833,6 +1833,27 @@ static void drawTop() {
   // --- the Cardputer at the apex ---
   topCanvas.fillRoundRect(apexX - 8, apexY - 3, 16, 6, 1, cCyan);
 
+#if defined(RADAR_CSI)
+  // --- cone mode badge (only with nodes): AUTO follows motion, MANUAL = picked with n ---
+  if (gNodeCount > 0) {
+    const bool  autoMode = coneAuto();
+    const char* badge    = autoMode ? "AUTO" : "MANUAL";
+    const int   bw       = topCanvas.textWidth(badge) + 10;
+    topCanvas.setTextSize(1);
+    if (autoMode) {
+      topCanvas.fillRoundRect(4, 136, bw, 12, 3, cCyan);
+      topCanvas.setTextColor(TFT_BLACK, cCyan);
+    } else {
+      topCanvas.fillRoundRect(4, 136, bw, 12, 3, TFT_BLACK);
+      topCanvas.drawRoundRect(4, 136, bw, 12, 3, cCyan);
+      topCanvas.setTextColor(cCyan, TFT_BLACK);
+    }
+    topCanvas.drawString(badge, 9, 138);
+    topCanvas.setTextColor(topCanvas.color565(154, 106, 168));
+    topCanvas.drawString(autoMode ? "follows motion" : "n: next zone", 4, 152);
+  }
+#endif
+
   // --- title bar: battery + range | contact state | mode pill ---
   topCanvas.setTextSize(1);
   topCanvas.fillRect(0, 0, W, 14, cBar);
@@ -1867,8 +1888,7 @@ static void drawTop() {
   topCanvas.setTextColor(cCyan);
   topCanvas.drawString(stats, 4, H - 10);
 #if defined(RADAR_CSI)
-  const char* hint = gNodeCount == 0 ? "[r] 5m/10m"
-                   : (coneAuto() ? "[n] AUTO [r] 5m/10m" : "[n] zone [r] 5m/10m");
+  const char* hint = gNodeCount == 0 ? "[r] 5m/10m" : "[n] zone [r] 5m/10m";
 #else
   const char* hint = "[r] 5m/10m";
 #endif

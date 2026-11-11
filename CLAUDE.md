@@ -21,7 +21,8 @@ Information (CSI). Realistic target: on-device **presence + motion**.
     every 1 m to 5 m or every 2 m to 10 m (`gRange10`, key r, saved in prefs).
     CSI has no distance, so motion = whole-cone glow + `MOTION xx%`; no dots.
     Key n picks the cone's zone (`gConeSel`: 0 = ME, 1..n nodes, n+1 = AUTO;
-    `coneZoneNow()` in zones_core.h, AUTO sticky +10% margin); zone name top-left.
+    `coneZoneNow()` in zones_core.h, AUTO sticky +10% margin); zone name top-left,
+    mode badge bottom-left (AUTO filled / MANUAL outlined, only with nodes).
     LD2410 later: dots on the centre line at the measured distance (moving =
     magenta, still = cyan) with a dashed band across the cone. `.` cycles
     cone → ZONES → 3D raycaster (unchanged, still has its own illustrative blips).

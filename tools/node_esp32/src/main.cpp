@@ -5,8 +5,10 @@
 // Wi-Fi details over ESP-NOW, encrypted (see include/node_proto.h).
 //
 // Run mode: joins the Wi-Fi, pings the router 50x/s and measures motion from
-// the router's CSI exactly like the Cardputer does, then broadcasts its result
-// over UDP 10x/s. The Cardputer names the node and shows it as a zone.
+// the router's CSI, then broadcasts its result over UDP 10x/s. The Cardputer
+// names the node and shows it as a zone.
+// Raw CSI logging (v2): a PC running tools/csi_lab/record.py sends
+// C,LOG,<mac>,<port> and the node streams every router CSI packet to it.
 // LED: on while motion is detected; fast blink when the Cardputer asks (BLINK LED).
 //
 // Reset: hold the BOOT button 5 s (after power-up) -> Wi-Fi forgotten, setup mode.
@@ -28,7 +30,7 @@
 #endif
 #define BOOT_PIN 0
 
-static const char* kFwVer = "1.0";
+static const char* kFwVer = "2.0-dev";
 
 static uint8_t gMyMac[6];
 static char    gMyHex[13];
@@ -158,13 +160,14 @@ static void runSetupMode() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Run mode: CSI motion sensing (same pipeline as the Cardputer, see main.cpp there)
+// Run mode: CSI motion sensing
 // ══════════════════════════════════════════════════════════════════════════════
-struct CsiPkt { int8_t buf[128]; int8_t rssi; uint8_t cat; };
+struct CsiPkt { int8_t buf[128]; wifi_pkt_rx_ctrl_t rx; uint8_t cat; };
 static QueueHandle_t     gCsiQ     = nullptr;
 static uint8_t           gBssid[6] = {0};
 static volatile bool     gBssidOk  = false;
 static volatile uint32_t gCsiCount = 0;
+static volatile uint32_t gCsiDrop  = 0;   // queue full (diagnostic, sent in raw logs)
 static esp_ping_handle_t gPing     = nullptr;
 static bool              gSensing  = false;
 
@@ -203,11 +206,12 @@ static void csiCallback(void*, wifi_csi_info_t* info) {
     if (memcmp(info->mac, gBssid, 6) != 0) return;
     CsiPkt pk;
     memcpy(pk.buf, info->buf, 128);
-    pk.rssi = info->rx_ctrl.rssi;
+    pk.rx   = info->rx_ctrl;
     // frame kind: 11bg / 11n, 20/40 MHz, STBC. Different kinds have different
     // L-LTF shapes, so only one kind is ever compared (see processCsiPkt).
     pk.cat  = (uint8_t)(info->rx_ctrl.sig_mode | (info->rx_ctrl.cwb << 2) | (info->rx_ctrl.stbc << 3));
     if (xQueueSend(gCsiQ, &pk, 0) == pdTRUE) gCsiCount++;
+    else gCsiDrop++;
 }
 
 // Frame-kind lock: every second the most common kind of router frame (normally
@@ -231,8 +235,11 @@ static bool csiKindOk(const CsiPkt& pk, uint32_t now) {
     return gLockCat < 0 || pk.cat == gLockCat;
 }
 
-static void processCsiPkt(const CsiPkt& pk, uint32_t now) {
-    if (!csiKindOk(pk, now)) return;
+// Result of processCsiPkt (also logged in raw CSI records).
+enum : uint8_t { kPktKindSkipped = 0, kPktWeak = 1, kPktFilling = 2, kPktMetric = 3 };
+
+static uint8_t processCsiPkt(const CsiPkt& pk, uint32_t now) {
+    if (!csiKindOk(pk, now)) return kPktKindSkipped;
     float amp[kSub];
     float sum = 0.0f;
     int   j   = 0;
@@ -243,16 +250,16 @@ static void processCsiPkt(const CsiPkt& pk, uint32_t now) {
         sum += amp[j++];
     }
     float mean = sum / kSub;
-    if (mean < 0.5f) return;
+    if (mean < 0.5f) return kPktWeak;
     float inv = 1.0f / mean;
     float* slot = gShape[gWinIdx];
     for (int i = 0; i < kSub; i++) slot[i] = amp[i] * inv;
     gWinIdx = (gWinIdx + 1) % kCsiWin;
     if (gWinFill < kCsiWin) gWinFill++;
     gLastPktMs = now;
-    gRssiEma  += ((float)pk.rssi - gRssiEma) * 0.1f;
+    gRssiEma  += ((float)pk.rx.rssi - gRssiEma) * 0.1f;
     gCsiRssi   = (int8_t)lroundf(gRssiEma);
-    if (gWinFill < kCsiWin) return;
+    if (gWinFill < kCsiWin) return kPktFilling;
     float acc = 0.0f;
     for (int i = 0; i < kSub; i++) {
         float m = 0.0f, q = 0.0f;
@@ -263,6 +270,91 @@ static void processCsiPkt(const CsiPkt& pk, uint32_t now) {
     }
     gCsiMetric = acc / kSub;
     if (gCalPhase == 2) { const double v = gCsiMetric; gCalSum += v; gCalSq += v * v; gCalN++; }
+    return kPktMetric;
+}
+
+// ── raw CSI logging to a PC (tools/csi_lab/record.py) ─────────────────────────
+// The PC sends C,LOG,<mac>,<port> (repeated every ~2 s as a keep-alive); the node
+// streams every router CSI packet to the sender's IP:<port>, 8 records per
+// datagram. Stops after kLogTimeoutMs without a refresh, or on C,LOG,<mac>,0.
+// Format (little-endian), version 1:
+//   datagram = LogHdr + count * LogRec
+#pragma pack(push, 1)
+struct LogHdr {
+    char     magic[4];      // "CSIL"
+    uint8_t  ver;           // 1
+    uint8_t  count;         // records in this datagram
+    uint8_t  mac[6];        // node station MAC
+    uint32_t dseq;          // datagram sequence
+    uint32_t drops;         // CSI packets lost to a full queue since boot
+};
+struct LogRec {
+    uint32_t rx_us;         // rx_ctrl.timestamp (radio clock, us)
+    uint32_t ms;            // millis() when processed (detector "now")
+    float    metric;        // detector metric after this packet (v1)
+    int8_t   rssi;
+    int8_t   noise;
+    uint8_t  rate;
+    uint8_t  sig_mode;
+    uint8_t  mcs;
+    uint8_t  cwb;
+    uint8_t  stbc;
+    uint8_t  channel;
+    uint8_t  status;        // kPkt* result of processCsiPkt
+    uint8_t  sgi;
+    uint8_t  lock_cat;      // locked frame kind (255 = none yet)
+    uint8_t  cat;           // this packet's frame kind
+    int8_t   buf[128];      // raw CSI (classic ESP32 order: 0..63 = SC 0..31, -32..-1)
+};
+#pragma pack(pop)
+static_assert(sizeof(LogRec) == 152, "LogRec layout");
+
+static const int      kLogPerDgram  = 8;
+static const uint32_t kLogTimeoutMs = 6000;
+static IPAddress gLogIp;
+static uint16_t  gLogPort    = 0;      // 0 = off
+static uint32_t  gLogLastCmd = 0;
+static uint32_t  gLogDseq    = 0;
+static uint32_t  gLogFirstMs = 0;
+static uint8_t   gLogN       = 0;
+static uint8_t   gLogBuf[sizeof(LogHdr) + kLogPerDgram * sizeof(LogRec)];
+
+static void logFlush() {
+    if (!gLogN || !gLogPort || !gUdpOn) { gLogN = 0; return; }
+    LogHdr h;
+    memcpy(h.magic, "CSIL", 4);
+    h.ver = 1; h.count = gLogN;
+    memcpy(h.mac, gMyMac, 6);
+    h.dseq = ++gLogDseq; h.drops = gCsiDrop;
+    memcpy(gLogBuf, &h, sizeof(h));
+    gUdp.beginPacket(gLogIp, gLogPort);
+    gUdp.write(gLogBuf, sizeof(LogHdr) + gLogN * sizeof(LogRec));
+    gUdp.endPacket();
+    gLogN = 0;
+}
+
+static void logPacket(const CsiPkt& pk, uint8_t status, uint32_t now) {
+    if (!gLogPort) return;
+    LogRec r;
+    r.rx_us = pk.rx.timestamp; r.ms = now; r.metric = gCsiMetric;
+    r.rssi = pk.rx.rssi; r.noise = pk.rx.noise_floor; r.rate = pk.rx.rate;
+    r.sig_mode = pk.rx.sig_mode; r.mcs = pk.rx.mcs; r.cwb = pk.rx.cwb; r.stbc = pk.rx.stbc;
+    r.channel = pk.rx.channel; r.status = status; r.sgi = pk.rx.sgi;
+    r.lock_cat = gLockCat < 0 ? 255 : (uint8_t)gLockCat; r.cat = pk.cat;
+    memcpy(r.buf, pk.buf, 128);
+    if (gLogN == 0) gLogFirstMs = now;
+    memcpy(gLogBuf + sizeof(LogHdr) + gLogN * sizeof(LogRec), &r, sizeof(r));
+    if (++gLogN >= kLogPerDgram) logFlush();
+}
+
+static void serviceLog(uint32_t now) {
+    if (!gLogPort) return;
+    if (now - gLogLastCmd > kLogTimeoutMs) {
+        Serial.println("# raw log: PC stopped refreshing, off");
+        gLogN = 0; gLogPort = 0;
+        return;
+    }
+    if (gLogN && now - gLogFirstMs >= 100) logFlush();
 }
 
 static void stopPing() {
@@ -323,6 +415,7 @@ static void startSensing() {
 }
 
 static void stopSensing() {
+    gLogN = 0; gLogPort = 0;
     stopPing();
     esp_wifi_set_csi(false);
     esp_wifi_set_promiscuous(false);
@@ -362,8 +455,9 @@ static bool stepCal(uint32_t now, bool haveCsi) {
     return false;
 }
 
-static void handleCommand(char* line) {
+static void handleCommand(char* line, const IPAddress& from) {
     // C,CAL | C,CALSTOP | C,UNCAL | C,THR,<f> | C,BLINK,<mac> | C,FORGET,<mac>
+    // C,LOG,<mac>,<port>  (port 0 = stop; from a PC, see tools/csi_lab)
     if (strncmp(line, "C,", 2) != 0) return;
     char* cmd = line + 2;
     char* arg = strchr(cmd, ',');
@@ -377,6 +471,21 @@ static void handleCommand(char* line) {
     }
     else if (strcmp(cmd, "BLINK") == 0 && arg && strcasecmp(arg, gMyHex) == 0) gBlinkUntil = millis() + 5000;
     else if (strcmp(cmd, "FORGET") == 0 && arg && strcasecmp(arg, gMyHex) == 0) { stopSensing(); forgetAndRestart(); }
+    else if (strcmp(cmd, "LOG") == 0 && arg) {
+        char* portStr = strchr(arg, ',');
+        if (!portStr) return;
+        *portStr++ = '\0';
+        if (strcasecmp(arg, gMyHex) != 0) return;
+        const long port = atol(portStr);
+        if (port <= 0 || port > 65535) {
+            if (gLogPort) Serial.println("# raw log: off");
+            logFlush(); gLogPort = 0;
+            return;
+        }
+        if (!gLogPort || gLogIp != from || gLogPort != (uint16_t)port)
+            Serial.printf("# raw log: on -> %s:%ld\n", from.toString().c_str(), port);
+        gLogIp = from; gLogPort = (uint16_t)port; gLogLastCmd = millis();
+    }
 }
 
 static void serviceUdp() {
@@ -389,7 +498,7 @@ static void serviceUdp() {
         if (n <= 0) continue;
         buf[n] = '\0';
         while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
-        handleCommand(buf);
+        handleCommand(buf, gUdp.remoteIP());
     }
 }
 
@@ -404,8 +513,12 @@ static void serviceSensing(uint32_t now) {
     if (gCsiQ) {
         CsiPkt pk;
         int n = 0;
-        while (n++ < 32 && xQueueReceive(gCsiQ, &pk, 0) == pdTRUE) processCsiPkt(pk, now);
+        while (n++ < 32 && xQueueReceive(gCsiQ, &pk, 0) == pdTRUE) {
+            const uint8_t st = processCsiPkt(pk, now);
+            logPacket(pk, st, now);
+        }
     }
+    serviceLog(now);
     if (now - last >= 66) {
         last = now;
         if (now - rateT0 >= 1000) { gPktRate = (uint16_t)(gCsiCount - rateCnt0); rateCnt0 = gCsiCount; rateT0 = now; }

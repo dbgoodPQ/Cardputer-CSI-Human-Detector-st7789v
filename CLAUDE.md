@@ -52,6 +52,12 @@ room by room. Realistic target: **presence + motion** per room.
   ref (mean+3sd) or AUTO floor x2, 10 s hold. Modes AUTO | CAL | RUN | NO CSI; broadcasts `N,<mac>,<seq>,<pres>,<motion>,
   <rssi>,<rate>,<mode>` on UDP 4211 at 10 Hz. Cardputer → nodes UDP 4212:
   `C,CAL|CALSTOP|UNCAL|THR,<f>|BLINK,<mac>|FORGET,<mac>` (THR resent every 5 s).
+- Raw CSI logging (fw 2.0-dev): `C,LOG,<mac>,<port>` from a PC (keep-alive every
+  2 s, node stops after 6 s; port 0 = stop) → node streams every router CSI packet
+  to sender IP:port as `CSIL` v1 datagrams (20 B header + up to 8 x 152 B records:
+  radio ts, millis, v1 metric, rx_ctrl fields, status, frame kind, 128 B CSI).
+  Normal sensing continues. Tools: `tools/csi_lab/` (record.py, replay.py with
+  an exact float32 Python port of v1 in detectors.py; recordings gitignored).
 - Cardputer side: `include/zones_core.h` (storage prefs "nodes", UDP, zones,
   ESP-NOW plumbing, bottom chips) and `include/zones_ui.h` (ZONES view, NODES
   menu: list / node RENAME-BLINK-REMOVE / add-node flow). Zone i == node i. Names live on the
@@ -91,6 +97,8 @@ room by room. Realistic target: **presence + motion** per room.
   plumbing, cone selection, chips, `nodesTag()`.
 - `include/zones_ui.h` — ZONES view, NODES menu, add-node flow.
 - `tools/node_esp32/` — node firmware (PlatformIO, esp32dev).
+- `tools/csi_lab/` — PC tools (Python 3.10+, numpy, matplotlib): record raw CSI
+  from a node, replay/score detectors offline, plots.
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
 
 ## Status (v2)
@@ -106,9 +114,11 @@ boards, one per room.
 `kCsiWin`=25, hold 10 s, default threshold 0.15.
 
 ## Next steps (priority order)
-1. **Rework node motion detection** (docs/V2_ROADMAP.md, goal 2): raw CSI
-   logging mode first, compare methods offline on real sessions, then change
-   the node firmware.
+1. **Rework node motion detection** (docs/V2_ROADMAP.md, goal 2, path B: our
+   own reimplementation of ESPectre-style ideas, never copy its GPL code/weights).
+   Phase 1 (raw logging + csi_lab) done; waiting for user recordings
+   (per room 2x empty, 2x walk, 1x still, 5 min). Next: phase 2 steadier input
+   (100/s ping, fixed TX rate, 10 ms slots, 1 s windows), phase 3 new measure.
 2. **Per-node calibration** from the node menu; persist calibration on the node.
 3. **Presence event log** on the bottom screen with optional SD persistence.
 4. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)

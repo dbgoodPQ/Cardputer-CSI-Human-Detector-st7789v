@@ -160,7 +160,7 @@ static void runSetupMode() {
 // ══════════════════════════════════════════════════════════════════════════════
 // Run mode: CSI motion sensing (same pipeline as the Cardputer, see main.cpp there)
 // ══════════════════════════════════════════════════════════════════════════════
-struct CsiPkt { int8_t buf[128]; int8_t rssi; };
+struct CsiPkt { int8_t buf[128]; int8_t rssi; uint8_t cat; };
 static QueueHandle_t     gCsiQ     = nullptr;
 static uint8_t           gBssid[6] = {0};
 static volatile bool     gBssidOk  = false;
@@ -204,10 +204,35 @@ static void csiCallback(void*, wifi_csi_info_t* info) {
     CsiPkt pk;
     memcpy(pk.buf, info->buf, 128);
     pk.rssi = info->rx_ctrl.rssi;
+    // frame kind: 11bg / 11n, 20/40 MHz, STBC. Different kinds have different
+    // L-LTF shapes, so only one kind is ever compared (see processCsiPkt).
+    pk.cat  = (uint8_t)(info->rx_ctrl.sig_mode | (info->rx_ctrl.cwb << 2) | (info->rx_ctrl.stbc << 3));
     if (xQueueSend(gCsiQ, &pk, 0) == pdTRUE) gCsiCount++;
 }
 
+// Frame-kind lock: every second the most common kind of router frame (normally
+// the 11n ping replies) becomes the only one used; the window restarts when it changes.
+static uint16_t gCatCnt[32];
+static int      gLockCat = -1;
+static uint32_t gCatT0   = 0;
+
+static bool csiKindOk(const CsiPkt& pk, uint32_t now) {
+    gCatCnt[pk.cat & 31]++;
+    if (now - gCatT0 >= 1000) {
+        int best = -1; uint16_t bc = 0;
+        for (int i = 0; i < 32; i++) if (gCatCnt[i] > bc) { bc = gCatCnt[i]; best = i; }
+        const uint16_t cur = gLockCat >= 0 ? gCatCnt[gLockCat] : 0;
+        if (best >= 0 && bc >= 5 && best != gLockCat && cur < bc / 2) {
+            gLockCat = best; gWinFill = 0; gWinIdx = 0;
+        }
+        memset(gCatCnt, 0, sizeof(gCatCnt));
+        gCatT0 = now;
+    }
+    return gLockCat < 0 || pk.cat == gLockCat;
+}
+
 static void processCsiPkt(const CsiPkt& pk, uint32_t now) {
+    if (!csiKindOk(pk, now)) return;
     float amp[kSub];
     float sum = 0.0f;
     int   j   = 0;
@@ -267,7 +292,7 @@ static void startPing() {
     Serial.printf("# ping %s: %s\n", gw.toString().c_str(), gPing ? "on" : "FAILED");
 }
 
-static void IRAM_ATTR promiscuousRxCb(void*, wifi_promiscuous_pkt_type_t) {}
+__attribute__((unused)) static void IRAM_ATTR promiscuousRxCb(void*, wifi_promiscuous_pkt_type_t) {}
 
 static void startSensing() {
     if (!gCsiQ) gCsiQ = xQueueCreate(32, sizeof(CsiPkt));
@@ -278,11 +303,10 @@ static void startSensing() {
     gWinIdx = 0; gWinFill = 0; gCsiMetric = 0.0f; gCsiMotion = 0.0f;
     gFloor = 0.0f; gLastPktMs = 0; gRssiEma = (float)WiFi.RSSI();
     esp_wifi_set_ps(WIFI_PS_NONE);
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_promiscuous_rx_cb(promiscuousRxCb);
-    wifi_promiscuous_filter_t pf{};
-    pf.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;   // same as the Cardputer
-    esp_wifi_set_promiscuous_filter(&pf);
+    // No promiscuous mode: only router frames addressed to this node (its ping
+    // replies), not the ones sent to other devices. Same as the Cardputer.
+    esp_wifi_set_promiscuous(false);
+    gLockCat = -1; gCatT0 = millis(); memset(gCatCnt, 0, sizeof(gCatCnt));
     wifi_csi_config_t cfg = {};
     cfg.lltf_en = true; cfg.htltf_en = true; cfg.stbc_htltf2_en = true;
     cfg.ltf_merge_en = true; cfg.channel_filter_en = true;

@@ -36,6 +36,13 @@ Information (CSI). Realistic target: on-device **presence + motion**.
 ## On-device CSI pipeline (`cardputer-radar-csi`, ST7789V fork)
 - `csiCallback` keeps only frames whose `info->mac` == router BSSID, queues the
   first 128 bytes (L-LTF). `startPing()` pings the gateway at 50 Hz (esp_ping).
+- **No promiscuous mode** (Cardputer and nodes): with it, CSI also came from the
+  router's frames to OTHER stations (e.g. the nodes' pings), each with its own
+  shape → high motion in an empty room (user-reported). IDF 4.4's
+  wifi_csi_info_t has no dmac, so promiscuous is simply off. Spycam sniffer
+  (`sniffCallback`) therefore gets nothing → no camera icons.
+- Frame-kind lock (`csiKindOk`): kind = sig_mode | cwb<<2 | stbc<<3; each second
+  the most common kind becomes the only one processed (window reset on change).
 - `processCsiPkt`: 52 data subcarriers (1..26, 38..63), divided by their mean
   (AGC cancel); `gCsiMetric` = mean per-subcarrier variance over `kCsiWin`=25 frames.
 - `serviceCsi` (15 Hz): motion = (metric/ref - 1)/`kCsiSpan`; ref = `gCalRef`
@@ -130,8 +137,7 @@ re-testing on hardware.
 `kCsiSpan`=4, `kAutoMargin`=2, `kCsiWin`=25, hold `kHold`=150 (10 s),
 default threshold 0.15, IMU thresholds 6 dps / 0.05 g / 2 s settle.
 ℹ️ Range cone replaced the PPI radar circle (user request; mockup on a claude.ai
-Design canvas "Range Cone Screen"). 3D view blips remain illustrative. Spycam icons = OUI match on sniffed MACs (many false
-positives: ESP32, Amazon, Realtek are generic).
+Design canvas "Range Cone Screen"). 3D view blips remain illustrative. Spycam icons disabled in practice (no promiscuous mode).
 ℹ️ The UART/UDP builds (`cardputer-radar`, `cardputer-radar-wifi`) are inherited
 from the original and untouched by this fork (`tools/sensor_s3` is not in this repo).
 
@@ -141,7 +147,8 @@ from the original and untouched by this fork (`tools/sensor_s3` is not in this r
 2. **Persist calibration** per BSSID in prefs (currently lost on reboot).
 3. **Bearing / distance:** not possible with one antenna; keep scope honest or
    explore a 2nd receiver (C5) for RSSI/phase deltas.
-4. **Spycam icons:** show vendor name next to icon, add a setting to hide them.
+4. **Spycam icons:** would need promiscuous mode back only between CSI windows,
+   or a separate scan; currently none.
 5. **TODO (user request, later): add mmWave radar HLK-LD2410** (24 GHz, UART,
    5 V) on the Grove port (G1/G2 = Serial1). Detects still people (breathing
    micro-motion) + distance gates; fuse with CSI (contact if either is

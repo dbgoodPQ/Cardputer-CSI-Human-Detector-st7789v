@@ -62,7 +62,7 @@ static char  wifiIP[16] = "---";
 //     frames: tiny when the room is still, large when someone moves in the link.
 //  5. Motion 0..1 = (metric / ref - 1) / kCsiSpan. ref = empty-room calibration
 //     (key c) or, before calibration, kAutoMargin x a slowly tracked quiet floor.
-struct CsiPkt { int8_t buf[128]; int8_t rssi; };
+struct CsiPkt { int8_t buf[128]; int8_t rssi; uint8_t cat; };
 static QueueHandle_t     gCsiQ     = nullptr;
 static uint8_t           gBssid[6] = {0};
 static volatile bool     gBssidOk  = false;
@@ -178,7 +178,7 @@ static bool serviceImu(uint32_t now) {
     return gImuMoving;
 }
 
-static void IRAM_ATTR promiscuousRxCb(void*, wifi_promiscuous_pkt_type_t) {}
+__attribute__((unused)) static void IRAM_ATTR promiscuousRxCb(void*, wifi_promiscuous_pkt_type_t) {}
 
 // WiFi task context: filter + copy only, the maths runs in loop().
 static void csiCallback(void*, wifi_csi_info_t* info) {
@@ -187,10 +187,35 @@ static void csiCallback(void*, wifi_csi_info_t* info) {
     CsiPkt pk;
     memcpy(pk.buf, info->buf, 128);
     pk.rssi = info->rx_ctrl.rssi;
+    // frame kind: 11bg / 11n, 20/40 MHz, STBC. Different kinds have different
+    // L-LTF shapes, so only one kind is ever compared (see processCsiPkt).
+    pk.cat  = (uint8_t)(info->rx_ctrl.sig_mode | (info->rx_ctrl.cwb << 2) | (info->rx_ctrl.stbc << 3));
     if (xQueueSend(gCsiQ, &pk, 0) == pdTRUE) gCsiCount++;
 }
 
+// Frame-kind lock: every second the most common kind of router frame (normally
+// the 11n ping replies) becomes the only one used; the window restarts when it changes.
+static uint16_t gCatCnt[32];
+static int      gLockCat = -1;
+static uint32_t gCatT0   = 0;
+
+static bool csiKindOk(const CsiPkt& pk, uint32_t now) {
+    gCatCnt[pk.cat & 31]++;
+    if (now - gCatT0 >= 1000) {
+        int best = -1; uint16_t bc = 0;
+        for (int i = 0; i < 32; i++) if (gCatCnt[i] > bc) { bc = gCatCnt[i]; best = i; }
+        const uint16_t cur = gLockCat >= 0 ? gCatCnt[gLockCat] : 0;
+        if (best >= 0 && bc >= 5 && best != gLockCat && cur < bc / 2) {
+            gLockCat = best; gWinFill = 0; gWinIdx = 0;
+        }
+        memset(gCatCnt, 0, sizeof(gCatCnt));
+        gCatT0 = now;
+    }
+    return gLockCat < 0 || pk.cat == gLockCat;
+}
+
 static void processCsiPkt(const CsiPkt& pk, uint32_t now) {
+    if (!csiKindOk(pk, now)) return;
     // L-LTF order: subcarriers 0..31 then -32..-1. Data: 1..26 and -26..-1 (38..63).
     float amp[kSub];
     float sum = 0.0f;
@@ -504,8 +529,12 @@ static void enableCsi() {
     gFloor = 0.0f; gLastPktMs = 0; gRssiEma = (float)WiFi.RSSI();
     Serial.printf("# CSI router %02X:%02X:%02X:%02X:%02X:%02X\n",
                   gBssid[0], gBssid[1], gBssid[2], gBssid[3], gBssid[4], gBssid[5]);
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_promiscuous_rx_cb(promiscuousRxCb);
+    // No promiscuous mode: it made the radio report CSI for router frames sent to
+    // OTHER devices (incl. the sensor nodes' pings), each with its own shape, which
+    // read as strong motion in an empty room. Only frames addressed to us are used.
+    // (Side effect: the spycam sniffer gets no packets, so no camera icons.)
+    esp_wifi_set_promiscuous(false);
+    gLockCat = -1; gCatT0 = millis(); memset(gCatCnt, 0, sizeof(gCatCnt));
     wifi_csi_config_t cfg = {};
     cfg.lltf_en = true; cfg.htltf_en = true; cfg.stbc_htltf2_en = true;
     cfg.ltf_merge_en = true; cfg.channel_filter_en = true;
@@ -513,10 +542,6 @@ static void enableCsi() {
     esp_wifi_set_csi_config(&cfg);
     esp_wifi_set_csi_rx_cb(csiCallback, nullptr);
     esp_wifi_set_csi(true);
-    wifi_promiscuous_filter_t pf{};
-    pf.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
-    esp_wifi_set_promiscuous_filter(&pf);
-    esp_wifi_set_promiscuous_rx_cb(sniffCallback);
     startPing();
 }
 

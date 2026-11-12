@@ -3,11 +3,15 @@
   python replay.py recordings/*.csil
   python replay.py recordings/*.csil --cal recordings/kitchen_empty_*.csil --plot
   python replay.py recordings/kitchen_walk_*.csil --threshold 0.25
+  python replay.py recordings/*.csil --detector v2 --hold 10
 
-Scores (after --skip seconds of warm-up):
+Scores (after --skip seconds, default 15: you leaving the room, detector warm-up):
   empty -> false contact % of time, alarms (CLEAR -> CONTACT switches) per hour
   walk  -> detection % of time
-  still -> contact % of time (v1 is not expected to see still people beyond its hold)
+  still -> contact % of time (neither detector is meant to see people who stay still)
+
+v1 has its own 10 s hold built in. v2 reports raw motion; --hold N adds the
+display hold the Cardputer would apply, for a like-for-like comparison.
 """
 from __future__ import annotations
 
@@ -99,10 +103,26 @@ def calibrate(files: list[str], skip_s: float) -> float:
     return float(v.mean() + 3 * v.std())
 
 
-def score(label: str, res: dict, skip_s: float) -> dict:
+def apply_hold(res: dict, hold_s: float) -> None:
+    """Extends each contact by hold_s seconds (Cardputer display hold)."""
+    if hold_s <= 0:
+        return
+    p = res["present"].astype(bool)
+    t = res["t"]
+    out = p.copy()
+    last_on = -1e9
+    for i in range(len(p)):
+        if p[i]:
+            last_on = t[i]
+        elif t[i] - last_on <= hold_s:
+            out[i] = True
+    res["present"] = out
+
+
+def score(label: str, res: dict, skip_s: float, tick_s: float) -> dict:
     keep = res["t"] >= skip_s
     p = res["present"][keep].astype(bool)
-    hours = max(keep.sum() * 0.066 / 3600.0, 1e-9)
+    hours = max(keep.sum() * tick_s / 3600.0, 1e-9)
     alarms = int(np.sum(p[1:] & ~p[:-1])) + int(p[0]) if len(p) else 0
     return {"contact_pct": 100.0 * p.mean() if len(p) else 0.0, "alarms": alarms, "alarms_h": alarms / hours}
 
@@ -141,28 +161,51 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="+", help=".csil recordings (wildcards ok)")
     ap.add_argument("--detector", default="v1", choices=sorted(DETECTORS))
-    ap.add_argument("--threshold", type=float, default=0.15)
+    ap.add_argument("--threshold", type=float, default=None,
+                    help="detection threshold (default: v1 0.15, v2 0.5)")
+    ap.add_argument("--hold", type=float, default=0.0, help="display hold in seconds added to the output")
+    ap.add_argument("--gate", type=float, default=None, help="v2 only: energy gate (x quiet floor), e.g. 2")
+    ap.add_argument("--chain", action="store_true",
+                    help="replay each node's recordings back to back in time order with one detector, "
+                         "like a node that keeps running (v2 learns its quiet floor across files)")
     ap.add_argument("--cal", nargs="*", default=[], help="empty-room recordings for a calibrated (RUN) reference")
-    ap.add_argument("--skip", type=float, default=5.0, help="warm-up seconds ignored in scores")
+    ap.add_argument("--skip", type=float, default=15.0,
+                    help="first seconds ignored in scores (you leaving the room; detector warm-up)")
     ap.add_argument("--plot", action="store_true", help="save a PNG next to each recording")
     args = ap.parse_args()
 
     files = sorted({f for pat in args.files for f in (glob.glob(pat) or [pat])})
     cal_files = sorted({f for pat in args.cal for f in (glob.glob(pat) or [pat])})
+    if args.threshold is None:
+        args.threshold = 0.15 if args.detector == "v1" else 0.5
+    if cal_files and args.detector != "v1":
+        raise SystemExit("--cal is for v1; v2 learns its quiet floor by itself")
     cal_ref = calibrate(cal_files, args.skip) if cal_files else None
     if cal_ref is not None:
         print(f"calibrated reference from {len(cal_files)} file(s): {cal_ref:.6g}")
 
+    def new_det():
+        kw = {"gate": args.gate} if args.detector == "v2" else {}
+        return DETECTORS[args.detector](threshold=args.threshold, cal_ref=cal_ref, **kw)
+
+    recs = [csilog.load(f) for f in files]
+    if args.chain:
+        recs.sort(key=lambda r: (r.meta.get("node", ""), r.meta.get("start", "")))
     rows = []
-    for f in files:
-        rec = csilog.load(f)
+    det = None
+    prev_node = None
+    for rec in recs:
         if len(rec.recs) < 50:
             print(f"{rec.name}: too short, skipped")
             continue
-        det = DETECTORS[args.detector](threshold=args.threshold, cal_ref=cal_ref)
+        node = rec.meta.get("node")
+        if det is None or not args.chain or node != prev_node:
+            det = new_det()
+        prev_node = node
         res = run(rec, det)
+        apply_hold(res, args.hold)
         st = input_stats(rec)
-        sc = score(rec.label, res, args.skip)
+        sc = score(rec.label, res, args.skip, det.TICK_MS / 1000.0)
         rows.append((rec, sc))
         print(f"\n{rec.name}  [{rec.label}]  {st['seconds']:.0f} s, {st['pps']:.0f} pkt/s, "
               f"rssi {st['rssi_mean']:.0f}, gaps>100ms {st['gaps_100ms']} (max {st['max_gap_s']:.2f} s)")
@@ -178,8 +221,11 @@ def main() -> int:
             print(f"  plot: {png}")
 
     if rows:
-        print(f"\n== {args.detector}, threshold {args.threshold}, "
-              f"{'RUN (calibrated)' if cal_ref is not None else 'AUTO'} ==")
+        mode = ("RUN (calibrated)" if cal_ref is not None else "AUTO") if args.detector == "v1" else "self-learning floor"
+        hold = f", display hold {args.hold:g} s" if args.hold > 0 else ""
+        hold += f", gate {args.gate:g}x" if args.gate else ""
+        hold += ", chained per node" if args.chain else ""
+        print(f"\n== {args.detector}, threshold {args.threshold}, {mode}{hold} ==")
         for label, what in (("empty", "false contact"), ("walk", "detection"), ("still", "contact")):
             sel = [sc for rec, sc in rows if rec.label == label]
             if not sel:

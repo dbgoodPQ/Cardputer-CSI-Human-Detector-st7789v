@@ -5,9 +5,10 @@ offline, before changing the node firmware (v2 roadmap, phases 1 to 3).
 
 - `record.py` asks one node to stream every router CSI packet to your PC and saves
   a labelled recording (`.csil`, about 0.9 MB per minute).
-- `replay.py` runs a detector over recordings, scores it and can plot it.
-  Today it has `v1`, an exact copy of the current node detector; the new one
-  will be added next to it.
+- `replay.py` runs a detector over recordings, scores it and can plot it:
+  `v1` (an exact copy of the current node detector) or `v2` (the new detector,
+  phase 3, not on the nodes yet).
+- `fit.py` fits the v2 weights and checks them room by room on rooms they never saw.
 
 Needs node firmware **2.0-dev2 or newer** (raw logging; 2.0-dev switched logging
 off right away), Python 3.10+, and a PC on the same Wi-Fi network as the nodes.
@@ -72,8 +73,33 @@ the score:
 - `walk`: detection, % of the time.
 - `still`: contact, % of the time.
 
-`--cal` uses empty recordings as the calibrated reference (like pressing `c`),
-otherwise the detector runs in AUTO. `--plot` saves a PNG next to each recording.
+`--cal` uses empty recordings as the calibrated reference for v1 (like pressing
+`c`), otherwise v1 runs in AUTO. `--plot` saves a PNG next to each recording.
+The first 15 s of each recording are not scored (`--skip`).
+
+### v2 options
+
+```powershell
+python replay.py "recordings\*.csil" --detector v2              # raw motion, 4-on / 3-off
+python replay.py "recordings\*.csil" --detector v2 --hold 10    # + the Cardputer's 10 s display hold
+python replay.py "recordings\*.csil" --detector v2 --chain      # each node's files back to back
+python replay.py "recordings\*.csil" --detector v2 --gate 2     # optional energy gate (experimental)
+```
+
+v2 needs no calibration: it decides from how *smoothly* the signal changes over
+the last second (walking = smooth changes, empty room = random noise), checked
+every 250 ms; contact after 4 checks in a row, clear after 3.
+
+## Fit (v2)
+
+```powershell
+python fit.py "recordings\*.csil"
+```
+
+For each room it fits the weights on the other rooms only, replays the room
+with them and prints the scores: that is what to expect in a room the detector
+has never seen. Then it prints the weights fitted on all rooms (`V2_WEIGHTS` in
+`detectors.py`). Uses `empty` and `walk` recordings; `--room` names matter.
 
 ## File format
 

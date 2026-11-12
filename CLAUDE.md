@@ -104,8 +104,9 @@ room by room. Realistic target: **presence + motion** per room.
   plumbing, cone selection, chips, `nodesTag()`.
 - `include/zones_ui.h` — ZONES view, NODES menu, add-node flow.
 - `tools/node_esp32/` — node firmware (PlatformIO, esp32dev).
-- `tools/csi_lab/` — PC tools (Python 3.10+, numpy, matplotlib): record raw CSI
-  from a node, replay/score detectors offline, plots.
+- `tools/csi_lab/` — PC tools (Python 3.10+, numpy, matplotlib): record.py
+  (raw CSI from a node), replay.py (score v1/v2, --hold/--chain/--gate, plots),
+  fit.py (v2 weights, leave-one-room-out), detectors.py (V1 exact port, V2).
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
 
 ## Status (v2)
@@ -123,9 +124,13 @@ boards, one per room.
 ## Next steps (priority order)
 1. **Rework node motion detection** (docs/V2_ROADMAP.md, goal 2, path B: our
    own reimplementation of ESPectre-style ideas, never copy its GPL code/weights).
-   Phase 1 (raw logging + csi_lab) done; waiting for user recordings
-   (per room 2x empty, 2x walk, 1x still, 5 min). Next: phase 2 steadier input
-   (100/s ping, fixed TX rate, 10 ms slots, 1 s windows), phase 3 new measure.
+   Phases 0, 1, 3 done: v2 detector in Python (`tools/csi_lab/detectors.py`
+   V2Detector: 12-subcarrier spread std/mean, causal Hampel, every 250 ms over 1 s
+   lag-1 autocorrelation "smoothness" > 0.42, 4-on/3-off, no calibration).
+   Leave-one-room-out on 9 user recordings: walk 99.2-99.6%, empty false
+   0-0.5%; v1 AUTO was 100% false. Findings in docs/V2_ROADMAP.md.
+   Next (user plans it): phase 2 firmware (100/s ping, 10 ms slots, 1 s windows),
+   new recordings at 100/s, redo phase 3 (fit.py), then port v2 to the node.
 2. **Per-node calibration** from the node menu; persist calibration on the node.
 3. **Presence event log** on the bottom screen with optional SD persistence.
 4. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)

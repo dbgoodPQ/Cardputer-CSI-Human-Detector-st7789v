@@ -251,9 +251,9 @@ enum : uint8_t { kPktKindSkipped = 0, kPktWeak = 1, kPktFilling = 2, kPktMetric 
 static uint8_t processCsiPkt(const CsiPkt& pk, uint32_t now) {
     if (!csiKindOk(pk, now)) return kPktKindSkipped;
     // time slots: keep the first packet of each 10 ms slot of the radio clock
-    const uint32_t slot = pk.rx.timestamp / kSlotUs;
-    if (slot == gLastSlot) return kPktSlotSkipped;
-    gLastSlot = slot;
+    const uint32_t timeSlot = pk.rx.timestamp / kSlotUs;
+    if (timeSlot == gLastSlot) return kPktSlotSkipped;
+    gLastSlot = timeSlot;
     float amp[kSub];
     float sum = 0.0f;
     int   j   = 0;

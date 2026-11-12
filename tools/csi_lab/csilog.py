@@ -16,10 +16,14 @@ from pathlib import Path
 import numpy as np
 
 MAGIC = b"CSIL"
-WIRE_VERSION = 1
+WIRE_VERSIONS = (1, 2)
 FILE_MAGIC = b"CSILOG 1\n"
 
 HDR = struct.Struct("<4sBB6sII")  # magic, ver, count, mac, dseq, drops
+HDR2_EXTRA = struct.Struct("<BBBB")  # v2: ping_hz, v1_win, slot_ms, flags
+
+# Node settings for recordings made before wire version 2 (firmware 2.0-dev2).
+V1_STREAM = {"ping_hz": 50, "v1_win": 25, "slot_ms": 0}
 REC_DTYPE = np.dtype([
     ("rx_us", "<u4"),     # radio timestamp, us
     ("ms", "<u4"),        # node millis() when processed
@@ -40,7 +44,7 @@ REC_DTYPE = np.dtype([
 ])
 assert REC_DTYPE.itemsize == 152
 
-STATUS_NAMES = {0: "kind skipped", 1: "weak", 2: "filling", 3: "metric"}
+STATUS_NAMES = {0: "kind skipped", 1: "weak", 2: "filling", 3: "metric", 4: "slot skipped"}
 LABELS = ("empty", "walk", "still", "other")
 
 
@@ -53,17 +57,28 @@ def norm_mac(mac: str) -> str:
 
 
 def parse_datagram(data: bytes):
-    """Returns (mac_hex, dseq, drops, records ndarray) or None if not a log datagram."""
+    """Returns (mac_hex, dseq, drops, records ndarray, stream dict) or None if not a log datagram.
+
+    stream = node settings: wire_version, ping_hz, v1_win, slot_ms.
+    """
     if len(data) < HDR.size:
         return None
     magic, ver, count, mac, dseq, drops = HDR.unpack_from(data)
-    if magic != MAGIC or ver != WIRE_VERSION:
+    if magic != MAGIC or ver not in WIRE_VERSIONS:
         return None
-    body = data[HDR.size:]
+    hsize = HDR.size
+    stream = dict(V1_STREAM, wire_version=ver)
+    if ver >= 2:
+        if len(data) < HDR.size + HDR2_EXTRA.size:
+            return None
+        ping_hz, v1_win, slot_ms, _flags = HDR2_EXTRA.unpack_from(data, HDR.size)
+        stream.update(ping_hz=ping_hz, v1_win=v1_win, slot_ms=slot_ms)
+        hsize += HDR2_EXTRA.size
+    body = data[hsize:]
     if len(body) != count * REC_DTYPE.itemsize:
         return None
     recs = np.frombuffer(body, dtype=REC_DTYPE, count=count)
-    return mac.hex().upper(), dseq, drops, recs
+    return mac.hex().upper(), dseq, drops, recs, stream
 
 
 class Recording:
@@ -72,6 +87,11 @@ class Recording:
         self.meta = meta
         self.recs = recs
         self.summary = summary or {}
+
+    @property
+    def stream(self) -> dict:
+        """Node settings the recording was made with (older files: firmware 2.0-dev2 values)."""
+        return {k: self.meta.get(k, v) for k, v in V1_STREAM.items()}
 
     @property
     def label(self) -> str:

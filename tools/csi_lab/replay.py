@@ -88,12 +88,18 @@ def parity(rec: csilog.Recording, res: dict, skip_s: float) -> str:
             f"{100 * np.mean(rel < 1e-3):.1f}% within 0.1%")
 
 
+def node_settings(rec: csilog.Recording) -> dict:
+    """Detector kwargs matching how the node was set up when recording."""
+    s = rec.stream
+    return {"win": s["v1_win"], "slot_ms": s["slot_ms"]}
+
+
 def calibrate(files: list[str], skip_s: float) -> float:
     """v1 empty-room reference (mean + 3 sd of the metric), from empty recordings."""
     vals = []
     for f in files:
         rec = csilog.load(f)
-        det = DETECTORS["v1"]()
+        det = DETECTORS["v1"](**node_settings(rec))
         res = run(rec, det)
         m = res["py_metric"][(res["pkt_t"] >= skip_s) & ~np.isnan(res["py_metric"])]
         vals.append(m)
@@ -184,9 +190,9 @@ def main() -> int:
     if cal_ref is not None:
         print(f"calibrated reference from {len(cal_files)} file(s): {cal_ref:.6g}")
 
-    def new_det():
+    def new_det(rec):
         kw = {"gate": args.gate} if args.detector == "v2" else {}
-        return DETECTORS[args.detector](threshold=args.threshold, cal_ref=cal_ref, **kw)
+        return DETECTORS[args.detector](threshold=args.threshold, cal_ref=cal_ref, **kw, **node_settings(rec))
 
     recs = [csilog.load(f) for f in files]
     if args.chain:
@@ -200,14 +206,16 @@ def main() -> int:
             continue
         node = rec.meta.get("node")
         if det is None or not args.chain or node != prev_node:
-            det = new_det()
+            det = new_det(rec)
         prev_node = node
         res = run(rec, det)
         apply_hold(res, args.hold)
         st = input_stats(rec)
         sc = score(rec.label, res, args.skip, det.TICK_MS / 1000.0)
         rows.append((rec, sc))
-        print(f"\n{rec.name}  [{rec.label}]  {st['seconds']:.0f} s, {st['pps']:.0f} pkt/s, "
+        ns = rec.stream
+        print(f"\n{rec.name}  [{rec.label}]  node {ns['ping_hz']} pings/s, slots {ns['slot_ms']} ms | "
+              f"{st['seconds']:.0f} s, {st['pps']:.0f} pkt/s, "
               f"rssi {st['rssi_mean']:.0f}, gaps>100ms {st['gaps_100ms']} (max {st['max_gap_s']:.2f} s)")
         print(f"  status {st['status']}")
         print("  frame kinds (sig_mode, mcs, cwb, stbc): "

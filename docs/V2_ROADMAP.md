@@ -1,7 +1,7 @@
 # Version 2 roadmap
 
 Branch: `version2` (from `main` @ `1257b06`, which already contains the `nodes` work).
-Status: goal 1 done; goal 2 phases 0, 1 and 3 (Python) done; next phase 2 + new recordings.
+Status: goal 1 done; goal 2 phases 0-3 done (3 in Python); next: recordings at 100 pings/s, refit, phase 4.
 
 ## Goal 1: Cardputer becomes a console only (done)
 
@@ -54,10 +54,13 @@ weights are fitted on our own recordings.
 1. **Raw CSI recording** (done, firmware 2.0-dev2): `C,LOG,<mac>,<port>` streams
    every router CSI packet to a PC; `tools/csi_lab/record.py` saves labelled
    recordings and `replay.py` scores detectors on them.
-2. **Steadier input** (next, node firmware): ping 100/s, 10 ms time slots (one
-   packet each), 1 s windows in real time, ready at >= 70% filled slots. Dropped
-   after the first recordings: fixing the node's TX rate (the router picks the
-   rate of its replies) and locking one MCS (made no difference).
+2. **Steadier input** (done, firmware 2.0-dev3): ping 100/s, 10 ms time slots
+   on the radio clock (first packet of each slot kept, others logged as
+   "slot skipped"), v1 window 50 packets (~0.5 s, as before). Raw log wire
+   version 2 records these settings. The 1 s real-time windows and the "ready at
+   >= 70% filled slots" rule belong to v2 and come with its port (phase 4).
+   Dropped after the first recordings: fixing the node's TX rate (the router
+   picks the rate of its replies) and locking one MCS (made no difference).
 3. **New detector v2** (done in Python, `detectors.py`): see results below.
    To redo with recordings made at 100 pings/s after phase 2.
 4. **v2 on the nodes + protocol:** port v2 (phases 2 and 4 in one firmware
@@ -87,15 +90,16 @@ Data: 3 rooms (SALON, CUISINE, SOUS-SOL), one node each, 1 x empty / walk / stil
 Per packet: spread = std/mean of 12 subcarrier amplitudes (+-3, 7, 11, 15, 19, 23),
 causal Hampel (7, 3 MAD). Every 250 ms over the last 1 s: smoothness (lag-1
 autocorrelation of spread) and spread variance vs a self-learned quiet floor.
-p = logistic(21.49 x smoothness - 8.97), i.e. motion when smoothness > 0.42.
+p = logistic(20.74 x smoothness - 8.64), i.e. motion when smoothness > 0.42
+(refitted with 10 ms slots; before slots: 21.49 / -8.97).
 Contact after 4 checks in a row, clear after 3. No calibration.
 
 Results (first 15 s of each file not scored):
 
 | | v1 AUTO | v1 calibrated | **v2, unseen room** (leave-one-room-out) |
 |---|---|---|---|
-| Empty: false contact | 100% | 0-3.5% (in-sample) | **0-0.5%**, 1 alarm per room at most |
-| Walking: detected | 99% | 84-100% | **99.2-99.6%** (first contact 2-3 s after start) |
+| Empty: false contact | 100% | 0-3.5% (in-sample) | **0-0.8%**, 1 alarm per room at most |
+| Walking: detected | 99% | 84-100% | **99.1-99.6%** (first contact 2-3 s after start) |
 | Still: contact | 100% | 0-4.5% | 0-1.5% |
 
 With the Cardputer's 10 s display hold added: walking 100%, empty 4.5%.

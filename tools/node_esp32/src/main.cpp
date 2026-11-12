@@ -4,7 +4,7 @@
 // from the Cardputer (settings > NODES > ADD NODE). The Cardputer sends the
 // Wi-Fi details over ESP-NOW, encrypted (see include/node_proto.h).
 //
-// Run mode: joins the Wi-Fi, pings the router 50x/s and measures motion from
+// Run mode: joins the Wi-Fi, pings the router 100x/s and measures motion from
 // the router's CSI, then broadcasts its result over UDP 10x/s. The Cardputer
 // names the node and shows it as a zone.
 // Raw CSI logging (v2): a PC running tools/csi_lab/record.py sends
@@ -30,7 +30,7 @@
 #endif
 #define BOOT_PIN 0
 
-static const char* kFwVer = "2.0-dev2";
+static const char* kFwVer = "2.0-dev3";
 
 static uint8_t gMyMac[6];
 static char    gMyHex[13];
@@ -177,7 +177,12 @@ static esp_ping_handle_t gPing     = nullptr;
 static bool              gSensing  = false;
 
 static const int   kSub        = 52;
-static const int   kCsiWin     = 25;
+// v2 phase 2: 100 pings/s, at most one packet per 10 ms slot (radio clock).
+// The v1 window doubles to 50 packets so it still spans ~0.5 s.
+static const int      kPingHz   = 100;
+static const uint32_t kSlotUs   = 10000;
+static const int      kCsiWin   = 50;
+static uint32_t       gLastSlot = 0xFFFFFFFFu;
 static float       gShape[kCsiWin][kSub];
 static int         gWinIdx     = 0;
 static int         gWinFill    = 0;
@@ -241,10 +246,14 @@ static bool csiKindOk(const CsiPkt& pk, uint32_t now) {
 }
 
 // Result of processCsiPkt (also logged in raw CSI records).
-enum : uint8_t { kPktKindSkipped = 0, kPktWeak = 1, kPktFilling = 2, kPktMetric = 3 };
+enum : uint8_t { kPktKindSkipped = 0, kPktWeak = 1, kPktFilling = 2, kPktMetric = 3, kPktSlotSkipped = 4 };
 
 static uint8_t processCsiPkt(const CsiPkt& pk, uint32_t now) {
     if (!csiKindOk(pk, now)) return kPktKindSkipped;
+    // time slots: keep the first packet of each 10 ms slot of the radio clock
+    const uint32_t slot = pk.rx.timestamp / kSlotUs;
+    if (slot == gLastSlot) return kPktSlotSkipped;
+    gLastSlot = slot;
     float amp[kSub];
     float sum = 0.0f;
     int   j   = 0;
@@ -282,7 +291,7 @@ static uint8_t processCsiPkt(const CsiPkt& pk, uint32_t now) {
 // The PC sends C,LOG,<mac>,<port> (repeated every ~2 s as a keep-alive); the node
 // streams every router CSI packet to the sender's IP:<port>, 8 records per
 // datagram. Stops after kLogTimeoutMs without a refresh, or on C,LOG,<mac>,0.
-// Format (little-endian), version 1:
+// Format (little-endian), version 2 (v1 = same without the last 4 header bytes):
 //   datagram = LogHdr + count * LogRec
 #pragma pack(push, 1)
 struct LogHdr {
@@ -292,7 +301,12 @@ struct LogHdr {
     uint8_t  mac[6];        // node station MAC
     uint32_t dseq;          // datagram sequence
     uint32_t drops;         // CSI packets lost to a full queue since boot
+    uint8_t  ping_hz;       // gateway pings per second
+    uint8_t  v1_win;        // v1 window, packets
+    uint8_t  slot_ms;       // slot admission (0 = off)
+    uint8_t  flags;         // reserved, 0
 };
+static_assert(sizeof(LogHdr) == 24, "LogHdr layout");
 struct LogRec {
     uint32_t rx_us;         // rx_ctrl.timestamp (radio clock, us)
     uint32_t ms;            // millis() when processed (detector "now")
@@ -305,7 +319,7 @@ struct LogRec {
     uint8_t  cwb;
     uint8_t  stbc;
     uint8_t  channel;
-    uint8_t  status;        // kPkt* result of processCsiPkt
+    uint8_t  status;        // kPkt* result of processCsiPkt (4 = second packet in a slot)
     uint8_t  sgi;
     uint8_t  lock_cat;      // locked frame kind (255 = none yet)
     uint8_t  cat;           // this packet's frame kind
@@ -328,7 +342,8 @@ static void logFlush() {
     if (!gLogN || !gLogPort || !gUdpOn) { gLogN = 0; return; }
     LogHdr h;
     memcpy(h.magic, "CSIL", 4);
-    h.ver = 1; h.count = gLogN;
+    h.ver = 2; h.count = gLogN;
+    h.ping_hz = kPingHz; h.v1_win = kCsiWin; h.slot_ms = kSlotUs / 1000; h.flags = 0;
     memcpy(h.mac, gMyMac, 6);
     h.dseq = ++gLogDseq; h.drops = gCsiDrop;
     memcpy(gLogBuf, &h, sizeof(h));
@@ -375,7 +390,7 @@ static void startPing() {
     esp_ping_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.count           = ESP_PING_COUNT_INFINITE;
-    cfg.interval_ms     = 20;
+    cfg.interval_ms     = 1000 / kPingHz;
     cfg.timeout_ms      = 1000;
     cfg.data_size       = 8;
     cfg.ttl             = 64;
@@ -399,6 +414,7 @@ static void startSensing() {
     xQueueReset(gCsiQ);
     gWinIdx = 0; gWinFill = 0; gCsiMetric = 0.0f; gCsiMotion = 0.0f;
     gFloor = 0.0f; gLastPktMs = 0; gRssiEma = (float)WiFi.RSSI();
+    gLastSlot = 0xFFFFFFFFu;
     esp_wifi_set_ps(WIFI_PS_NONE);
     // No promiscuous mode: only router frames addressed to this node (its ping
     // replies), not the ones sent to other devices. Same as the Cardputer.

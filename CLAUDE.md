@@ -47,14 +47,17 @@ room by room. Realistic target: **presence + motion** per room.
   Enter sends PAIR = SSID+psk AES-128-GCM (fixed key `NODE_PAIR_KEY`, AAD = node
   MAC + Cardputer MAC); node saves, PAIR_OK, reboots into run mode.
 - Run: node CSI pipeline (v1 method, to be reworked in v2): router-BSSID frames
-  only, no promiscuous mode, 50 Hz gateway ping, frame-kind lock, 52 L-LTF data
-  subcarriers / mean (AGC cancel), shape variance over 25 frames vs empty-room
+  only, no promiscuous mode, 100 Hz gateway ping (fw 2.0-dev3; 50 Hz before),
+  frame-kind lock, then 10 ms slot admission on rx_ctrl.timestamp (status 4 =
+  slot skipped), 52 L-LTF data
+  subcarriers / mean (AGC cancel), shape variance over 50 frames (25 before) vs empty-room
   ref (mean+3sd) or AUTO floor x2, 10 s hold. Modes AUTO | CAL | RUN | NO CSI; broadcasts `N,<mac>,<seq>,<pres>,<motion>,
   <rssi>,<rate>,<mode>` on UDP 4211 at 10 Hz. Cardputer → nodes UDP 4212:
   `C,CAL|CALSTOP|UNCAL|THR,<f>|BLINK,<mac>|FORGET,<mac>` (THR resent every 5 s).
 - Raw CSI logging (fw 2.0-dev2; 2.0-dev had a timeout bug): `C,LOG,<mac>,<port>` from a PC (keep-alive every
   2 s, node stops after 6 s; port 0 = stop) → node streams every router CSI packet
-  to sender IP:port as `CSIL` v1 datagrams (20 B header + up to 8 x 152 B records:
+  to sender IP:port as `CSIL` v2 datagrams (24 B header incl. ping_hz, v1_win,
+  slot_ms; v1 = 20 B header from fw 2.0-dev2; + up to 8 x 152 B records:
   radio ts, millis, v1 metric, rx_ctrl fields, status, frame kind, 128 B CSI).
   Normal sensing continues. Tools: `tools/csi_lab/` (record.py, replay.py with
   an exact float32 Python port of v1 in detectors.py; recordings gitignored).
@@ -129,8 +132,9 @@ boards, one per room.
    lag-1 autocorrelation "smoothness" > 0.42, 4-on/3-off, no calibration).
    Leave-one-room-out on 9 user recordings: walk 99.2-99.6%, empty false
    0-0.5%; v1 AUTO was 100% false. Findings in docs/V2_ROADMAP.md.
-   Next (user plans it): phase 2 firmware (100/s ping, 10 ms slots, 1 s windows),
-   new recordings at 100/s, redo phase 3 (fit.py), then port v2 to the node.
+   Phase 2 firmware done (2.0-dev3: 100/s ping, 10 ms slots, v1 window 50).
+   Next: user records a new set at 100/s (per room 2x empty, 2x walk, 1x still,
+   1x other "next room"), redo fit.py, then phase 4: port v2 to the node.
 2. **Per-node calibration** from the node menu; persist calibration on the node.
 3. **Presence event log** on the bottom screen with optional SD persistence.
 4. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)

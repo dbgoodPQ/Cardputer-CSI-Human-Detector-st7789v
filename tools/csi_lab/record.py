@@ -133,12 +133,13 @@ def main() -> int:
     print()
 
     meta = {"label": args.label, "room": args.room, "note": args.note, "node": mac, "node_ip": ip,
-            "start": datetime.now().isoformat(timespec="seconds"), "minutes": args.minutes,
-            "wire_version": csilog.WIRE_VERSION}
+            "start": datetime.now().isoformat(timespec="seconds"), "minutes": args.minutes}
+    # the file header is written with the first datagram, which tells the node's
+    # settings (ping rate, v1 window, slot size)
     n_recs = n_dgrams = lost = 0
     last_dseq = None
     first_drops = last_drops = None
-    status_cnt = [0, 0, 0, 0]
+    status_cnt = [0] * len(csilog.STATUS_NAMES)
     t0 = time.monotonic()
     t_end = t0 + args.minutes * 60
     next_cmd = 0.0
@@ -149,7 +150,7 @@ def main() -> int:
     hinted = False
     try:
         with open(path, "wb") as f:
-            csilog.write_header(f, meta)
+            header_done = False
             while True:
                 now = time.monotonic()
                 if now >= t_end:
@@ -182,7 +183,13 @@ def main() -> int:
                 p = csilog.parse_datagram(data)
                 if not p or p[0] != mac:
                     continue
-                _, dseq, drops, recs = p
+                _, dseq, drops, recs, stream = p
+                if not header_done:
+                    meta.update(stream)
+                    csilog.write_header(f, meta)
+                    header_done = True
+                    print(f"\n  node streams v{stream['wire_version']}: {stream['ping_hz']} pings/s, "
+                          f"slots {stream['slot_ms']} ms, v1 window {stream['v1_win']}")
                 if last_dseq is not None and dseq > last_dseq + 1:
                     lost += dseq - last_dseq - 1
                 last_dseq = dseq
@@ -195,7 +202,7 @@ def main() -> int:
                 sec_recs += len(recs)
                 rssi_last = int(recs["rssi"][-1])
                 for st in recs["status"]:
-                    if st < 4:
+                    if st < len(status_cnt):
                         status_cnt[st] += 1
     except KeyboardInterrupt:
         print("\nStopped early.")
@@ -208,6 +215,8 @@ def main() -> int:
                    status={csilog.STATUS_NAMES[i]: c for i, c in enumerate(status_cnt)})
     path.with_suffix(".json").write_text(json.dumps(summary, indent=2))
     print(f"\nSaved {n_recs} packets ({n_recs / max(dur, 1):.0f}/s) to {path}")
+    if not header_done:
+        path.unlink(missing_ok=True)
     if n_recs == 0:
         print("Nothing received: check that the node runs the v2 firmware and that the firewall allows "
               f"UDP {args.port} in.")

@@ -33,9 +33,15 @@ class V1Detector:
     AUTO_MARGIN = F32(2.0)
     HOLD = 150            # 10 s at 15 Hz
 
-    def __init__(self, threshold: float = 0.15, cal_ref: float | None = None):
+    def __init__(self, threshold: float = 0.15, cal_ref: float | None = None,
+                 win: int = 25, slot_ms: int = 0):
+        """win / slot_ms: node settings (firmware 2.0-dev2: 25 / 0; 2.0-dev3: 50 / 10).
+        replay.py takes them from each recording."""
         self.threshold = F32(threshold)
         self.cal_ref = None if cal_ref is None else F32(cal_ref)
+        self.WIN = int(win)
+        self.slot_us = int(slot_ms) * 1000
+        self.last_slot = None
         # processCsiPkt state
         self.shape = np.zeros((self.WIN, 52), dtype=F32)
         self.win_idx = 0
@@ -75,6 +81,11 @@ class V1Detector:
         now = int(rec["ms"])
         if not self._kind_ok(int(rec["cat"]), now):
             return 0
+        if self.slot_us:
+            slot = int(rec["rx_us"]) // self.slot_us
+            if slot == self.last_slot:
+                return 4
+            self.last_slot = slot
         buf = rec["buf"].astype(F32)
         a = buf[2 * V1_SUBCARRIERS]
         b = buf[2 * V1_SUBCARRIERS + 1]
@@ -139,8 +150,9 @@ V2_SUBCARRIERS = np.array([3, 7, 11, 15, 19, 23, 64 - 23, 64 - 19, 64 - 15, 64 -
 # leave-one-room-out checked); see docs/V2_ROADMAP.md. Never taken from another
 # project. The spread-variance weight is 0 for now: it did not help on this data
 # (each recording started with no learned floor); see the optional gate instead.
-# p >= 0.5  <=>  smoothness > 8.97 / 21.49 = 0.42
-V2_WEIGHTS = (21.49, 0.0, -8.97)
+# Refitted with 10 ms slot admission (phase 2).
+# p >= 0.5  <=>  smoothness > 8.64 / 20.74 = 0.42
+V2_WEIGHTS = (20.74, 0.0, -8.64)
 
 
 class V2Detector:
@@ -164,6 +176,7 @@ class V2Detector:
     TICK_MS = 250
     WIN_MS = 1000
     MIN_PKTS = 20           # per 1 s window, else "NO CSI"
+    SLOT_US = 10000         # at most one packet per 10 ms of radio clock (phase 2)
     HAMPEL_N = 7
     HAMPEL_K = 3.0
     ON_N = 4
@@ -172,7 +185,7 @@ class V2Detector:
     FLOOR_UP = 0.0025       # per tick: ~100 s time constant
 
     def __init__(self, threshold: float = 0.5, cal_ref: float | None = None, weights=None,
-                 gate: float | None = None):
+                 gate: float | None = None, **_node_settings):
         self.threshold = threshold
         self.w = tuple(weights) if weights is not None else V2_WEIGHTS
         # optional energy gate: a tick only counts as motion if mvs >= gate x quiet floor
@@ -186,6 +199,7 @@ class V2Detector:
         self.hist_v: list[float] = []
         self.raw7: list[float] = []
         self.log_floor = None if cal_ref is None else float(np.log(cal_ref))
+        self.last_slot = None
         self.on_cnt = 0
         self.off_cnt = 0
         self.present = False
@@ -211,6 +225,10 @@ class V2Detector:
         now = int(rec["ms"])
         if not self._kind_ok(int(rec["cat"]), now):
             return 0
+        slot = int(rec["rx_us"]) // self.SLOT_US
+        if slot == self.last_slot:
+            return 4
+        self.last_slot = slot
         buf = rec["buf"].astype(np.float32)
         a = buf[2 * V2_SUBCARRIERS]
         b = buf[2 * V2_SUBCARRIERS + 1]

@@ -12,6 +12,9 @@ offline, before changing the node firmware (v2 roadmap, phases 1 to 3).
 
 Needs node firmware **2.0-dev2 or newer** (raw logging; 2.0-dev switched logging
 off right away), Python 3.10+, and a PC on the same Wi-Fi network as the nodes.
+Firmware **2.0-dev3** pings 100 times a second with 10 ms slots; `record.py` shows
+the node's settings when the stream starts and stores them in the recording, so
+recordings from both firmwares can be replayed side by side.
 
 To update a node without pairing it again, flash `csi-node-esp32-app.bin` from the
 release at **0x10000**. The full `csi-node-esp32.bin` at 0x0 also erases the saved

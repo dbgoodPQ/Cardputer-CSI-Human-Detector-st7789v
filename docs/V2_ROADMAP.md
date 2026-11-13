@@ -1,7 +1,7 @@
 # Version 2 roadmap
 
 Branch: `version2` (from `main` @ `1257b06`, which already contains the `nodes` work).
-Status: goal 1 done; goal 2 phases 0-3 done (3 in Python, tuned on 2 days); next: phase 4 (v2 on the nodes).
+Status: goal 1 done; goal 2 phases 0-4 done (firmware 2.1.0-dev1, not yet on hardware); next: hardware test + long empty and next-room recordings.
 
 ## Goal 1: Cardputer becomes a console only (done)
 
@@ -63,9 +63,17 @@ weights are fitted on our own recordings.
    picks the rate of its replies) and locking one MCS (made no difference).
 3. **New detector v2** (done in Python, `detectors.py`): see results below.
    To redo with recordings made at 100 pings/s after phase 2.
-4. **v2 on the nodes + protocol:** port v2 (phases 2 and 4 in one firmware
-   update); node report gains probability + state (old 8-field reports still
-   accepted); the 10 s display hold moves to the Cardputer.
+4. **v2 on the nodes** (done, firmware 2.1.0-dev1): `include/csi_v2.h` (frame
+   gate + detector, plain C++, shared with a PC test build that matches
+   `detectors.py` exactly on all 24 recordings: same packet decisions, spread
+   within 3e-7, same contact decisions). 50 pings/s by default, `C,RATE` for
+   recordings at other rates. Hysteresis 0.12 (stay in contact while smoothness
+   > cut - 0.12): raw walking 86.5% -> 94.4%, still 0 empty-room alarms.
+   Report `N,...,<mode>,2,<fw>` (detector 2, firmware version); old 8-field
+   reports still accepted. Cardputer: 10 s display hold for v2 nodes, `c`/`x`
+   removed (no calibration), `,`/`/` = sensitivity (cut-off 0.30-0.60, default
+   0.42, `C,SENS`), versions shown (settings menu, NODES > node). Binaries are
+   named with `FW_VERSION` (include/fw_version.h).
 5. **Later:** signed reports and commands (per-network key sent at pairing; nodes
    must be paired again once).
 

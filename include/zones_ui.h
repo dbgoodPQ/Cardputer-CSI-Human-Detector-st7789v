@@ -90,7 +90,7 @@ static void trimName(char* name) {
 static const char* zoneStatus(const ZoneView& v, char* buf, size_t n, uint16_t& col) {
     if (!v.online)                       { col = uiCol(255, 80, 80);  return "OFFLINE"; }
     if (strcmp(v.mode, "NO CSI") == 0)   { col = uiCol(255, 80, 80);  return "NO SIGNAL"; }
-    if (strcmp(v.mode, "CAL") == 0)      { col = uiCol(255, 140, 0);  return "CAL"; }
+    if (strcmp(v.mode, "CAL") == 0)      { col = uiCol(255, 140, 0);  return "CAL"; }   // v1 nodes
     if (v.present) {
         snprintf(buf, n, "MOTION %d%%", (int)lroundf(v.motion * 100));
         col = uiCol(255, 120, 255);
@@ -140,7 +140,7 @@ static void drawZones() {
     const int top = 17, avail = 146;
     const int rowH = n <= 4 ? 37 : avail / n;
     const bool tall = rowH >= 30;
-    const int  thrX = 10 + (int)(gThreshold * 220);
+    const int  thrX = 10 + (int)(0.5f * 220);     // v2 motion level crosses 0.5 at the cut-off
     for (int z = 0; z < n; z++) {
         ZoneView v = getZone(z, now);
         const int y = top + z * rowH, h = rowH - 2;
@@ -203,7 +203,7 @@ static void drawZones() {
 
     // footer
     char thr[16];
-    snprintf(thr, sizeof(thr), "thr %d%%", (int)lroundf(gThreshold * 100));
+    snprintf(thr, sizeof(thr), "cut %.2f", gSens);
     topCanvas.setTextColor(gColB);
     topCanvas.drawString(thr, 4, H - 10);
     const char* hint = "[.] view  [c] cal all";
@@ -326,11 +326,15 @@ static void runNodeEdit(int idx) {
         canvas.setTextColor(cLbl); canvas.drawString("STATUS", 8, 40);
         const char* st;
         if (!v.online)                         st = gLive[idx].lastMs ? "offline" : "waiting for report";
-        else if (strcmp(v.mode, "RUN") == 0)   st = "online, calibrated";
-        else if (strcmp(v.mode, "CAL") == 0)   st = "online, calibrating";
         else if (strcmp(v.mode, "NO CSI") == 0) st = "online, no router frames";
-        else                                   st = "online, not calibrated";
+        else if (gLive[idx].detector >= 2)      st = "online, detector v2";
+        else                                    st = "online, old fw: update";
         canvas.setTextColor(v.online ? gColB : uiCol(255, 80, 80)); canvas.drawString(st, 62, 40);
+        if (v.online) {   // firmware version, right-aligned on the ID line
+            char fw[24];
+            snprintf(fw, sizeof(fw), "fw %s", gLive[idx].fw[0] ? gLive[idx].fw : "<2.1");
+            canvas.setTextColor(cLbl); canvas.drawString(fw, canvas.width() - 8 - canvas.textWidth(fw), 18);
+        }
         canvas.drawFastHLine(4, 52, canvas.width() - 8, uiCol(70, 0, 70));
 
         const char* opts[3] = { "RENAME", "BLINK LED", "REMOVE" };
@@ -526,7 +530,7 @@ static void runAddNode() {
                 snprintf(line, sizeof(line), "%ddBm  %u frames/s", gLive[targetIdx].rssi, (unsigned)gLive[targetIdx].rate);
                 uiCenter(line, 78, gColB);
             }
-            uiCenter("Place it, then press c to calibrate", 96, cSub);
+            uiCenter("Place it where it will stay", 96, cSub);
             break;
         }
         case NOREPORT:

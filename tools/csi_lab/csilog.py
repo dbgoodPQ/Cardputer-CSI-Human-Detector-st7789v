@@ -16,14 +16,14 @@ from pathlib import Path
 import numpy as np
 
 MAGIC = b"CSIL"
-WIRE_VERSIONS = (1, 2)
+WIRE_VERSIONS = (1, 2, 3)   # 3 = firmware 2.1+: metric is the v2 spread
 FILE_MAGIC = b"CSILOG 1\n"
 
 HDR = struct.Struct("<4sBB6sII")  # magic, ver, count, mac, dseq, drops
 HDR2_EXTRA = struct.Struct("<BBBB")  # v2: ping_hz, v1_win, slot_ms, flags
 
 # Node settings for recordings made before wire version 2 (firmware 2.0-dev2).
-V1_STREAM = {"ping_hz": 50, "v1_win": 25, "slot_ms": 0}
+V1_STREAM = {"ping_hz": 50, "v1_win": 25, "slot_ms": 0, "flags": 0}
 REC_DTYPE = np.dtype([
     ("rx_us", "<u4"),     # radio timestamp, us
     ("ms", "<u4"),        # node millis() when processed
@@ -44,7 +44,7 @@ REC_DTYPE = np.dtype([
 ])
 assert REC_DTYPE.itemsize == 152
 
-STATUS_NAMES = {0: "kind skipped", 1: "weak", 2: "filling", 3: "metric", 4: "slot skipped"}
+STATUS_NAMES = {0: "kind skipped", 1: "weak", 2: "filling", 3: "used", 4: "slot skipped"}
 LABELS = ("empty", "walk", "still", "other")
 
 
@@ -71,8 +71,8 @@ def parse_datagram(data: bytes):
     if ver >= 2:
         if len(data) < HDR.size + HDR2_EXTRA.size:
             return None
-        ping_hz, v1_win, slot_ms, _flags = HDR2_EXTRA.unpack_from(data, HDR.size)
-        stream.update(ping_hz=ping_hz, v1_win=v1_win, slot_ms=slot_ms)
+        ping_hz, v1_win, slot_ms, flags = HDR2_EXTRA.unpack_from(data, HDR.size)
+        stream.update(ping_hz=ping_hz, v1_win=v1_win, slot_ms=slot_ms, flags=flags)
         hsize += HDR2_EXTRA.size
     body = data[hsize:]
     if len(body) != count * REC_DTYPE.itemsize:

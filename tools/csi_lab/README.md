@@ -12,9 +12,12 @@ offline, before changing the node firmware (v2 roadmap, phases 1 to 3).
 
 Needs node firmware **2.0-dev2 or newer** (raw logging; 2.0-dev switched logging
 off right away), Python 3.10+, and a PC on the same Wi-Fi network as the nodes.
-Firmware **2.0-dev3** pings 100 times a second with 10 ms slots; `record.py` shows
-the node's settings when the stream starts and stores them in the recording, so
-recordings from both firmwares can be replayed side by side.
+`record.py` shows the node's settings when the stream starts (pings/s, slots,
+detector) and stores them in the recording, so recordings from all firmwares can
+be replayed side by side. Firmware **2.1+** runs the v2 detector at 50 pings/s;
+`--rate 100` asks the node for 100 pings/s during the recording only (it goes
+back to 50 after, and on reboot). With 2.1+ recordings, `replay.py` also checks
+that the node computed the same values as `detectors.py` (v2 parity line).
 
 To update a node without pairing it again, flash `csi-node-esp32-app.bin` from the
 release at **0x10000**. The full `csi-node-esp32.bin` at 0x0 also erases the saved
@@ -103,6 +106,16 @@ For each room it fits the weights on the other rooms only, replays the room
 with them and prints the scores: that is what to expect in a room the detector
 has never seen. Then it prints the weights fitted on all rooms (`V2_WEIGHTS` in
 `detectors.py`). Uses `empty` and `walk` recordings; `--room` names matter.
+
+## Developer check: node C code vs Python
+
+The node's v2 detector (`include/csi_v2.h`) is compiled for the PC and compared
+with `detectors.V2Detector` on recordings (needs a C++ compiler, e.g. g++):
+
+```
+g++ -O2 -std=c++17 -I../../include v2_host_test.cpp -o v2_host_test
+python v2_parity.py --bin ./v2_host_test "recordings/*.csil"
+```
 
 ## File format
 

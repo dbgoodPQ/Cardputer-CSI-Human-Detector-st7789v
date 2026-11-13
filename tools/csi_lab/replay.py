@@ -76,6 +76,26 @@ def input_stats(rec: csilog.Recording) -> dict:
     }
 
 
+def parity_v2(rec: csilog.Recording) -> str:
+    """Compares Python V2 per-packet spread with the one the node logged (firmware 2.1+)."""
+    from detectors import V2Detector
+    det = V2Detector()
+    node = rec.recs["metric"].astype(np.float64)
+    py = np.zeros(len(rec.recs))
+    same = 0
+    for i, r in enumerate(rec.recs):
+        det.last_spread = 0.0
+        st = det.process(r)
+        py[i] = det.last_spread if st == 3 else 0.0
+        same += st == r["status"]
+    used = (rec.recs["status"] == 3) & (node > 0)
+    if used.sum() < 10:
+        return "v2 parity: not enough samples"
+    rel = np.abs(py[used] - node[used]) / node[used]
+    return (f"v2 parity vs node: packet decisions same {100 * same / len(rec.recs):.2f}%, "
+            f"{100 * np.mean(rel < 1e-4):.1f}% of spreads within 0.01%")
+
+
 def parity(rec: csilog.Recording, res: dict, skip_s: float) -> str:
     """Compares the Python v1 metric with the one the node logged."""
     node = rec.recs["metric"].astype(np.float64)
@@ -91,7 +111,7 @@ def parity(rec: csilog.Recording, res: dict, skip_s: float) -> str:
 def node_settings(rec: csilog.Recording) -> dict:
     """Detector kwargs matching how the node was set up when recording."""
     s = rec.stream
-    return {"win": s["v1_win"], "slot_ms": s["slot_ms"]}
+    return {"win": s["v1_win"] or 25, "slot_ms": s["slot_ms"]}   # v1_win 0: no v1 on the node
 
 
 def calibrate(files: list[str], skip_s: float) -> float:
@@ -220,7 +240,9 @@ def main() -> int:
         print(f"  status {st['status']}")
         print("  frame kinds (sig_mode, mcs, cwb, stbc): "
               + ", ".join(f"{k}x{n}" for k, n in st["kinds"]))
-        if args.detector == "v1":
+        if rec.stream["flags"] & 1:
+            print("  " + parity_v2(rec))
+        elif args.detector == "v1":
             print("  " + parity(rec, res, args.skip))
         print(f"  contact {sc['contact_pct']:.1f}% of time, {sc['alarms']} alarms ({sc['alarms_h']:.0f}/h)")
         if args.plot:

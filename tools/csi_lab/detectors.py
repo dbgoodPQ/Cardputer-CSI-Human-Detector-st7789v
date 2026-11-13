@@ -168,8 +168,9 @@ class V2Detector:
       mvs    = variance of spread; compared with a quiet floor the node learns by
                itself (falls fast, rises slowly), as log(mvs / floor).
       p      = logistic(w_s * smooth + w_m * log(mvs/floor) + b)
-    Decision: contact after 10 evaluations in a row with p >= 0.5 (2.5 s), clear after
-    3 below. (4 in a row gave ~11 false alarms/hour in empty rooms on day 2; 10 gave
+    Decision: contact after 10 evaluations in a row with p >= 0.5 (2.5 s). Once in
+    contact, an evaluation still counts as motion while smoothness is above the
+    cut-off minus HYST (0.12: 0.42 -> 0.30); clear after 3 below. (4 in a row gave ~11 false alarms/hour in empty rooms on day 2; 10 gave
     none in 43 min of empty data, walking still covered ~99% with the 10 s display hold.)
     Optional gate: an evaluation only counts as motion if mvs >= gate x floor.
     The floor only rises while p < 0.5, so long motion doesn't teach it "busy".
@@ -183,6 +184,8 @@ class V2Detector:
     HAMPEL_K = 3.0
     ON_N = 10
     OFF_N = 3
+    HYST = 0.12             # smoothness hysteresis once in contact (day 1+2: walking
+                            # raw 86.5% -> 94.4%, still 0 empty-room alarms)
     FLOOR_DOWN = 0.2        # per tick, in log domain
     FLOOR_UP = 0.0025       # per tick: ~100 s time constant
 
@@ -248,6 +251,7 @@ class V2Detector:
             mad = 1.4826 * float(np.median(np.abs(np.array(self.raw7) - med)))
             if mad > 0 and abs(spread - med) > self.HAMPEL_K * mad:
                 spread = med
+        self.last_spread = spread
         self.hist_ms.append(now)
         self.hist_v.append(spread)
         while self.hist_ms and now - self.hist_ms[0] > 2 * self.WIN_MS:
@@ -290,7 +294,12 @@ class V2Detector:
             self.log_floor += (lx - self.log_floor) * self.FLOOR_DOWN
         elif p < self.threshold:
             self.log_floor += (lx - self.log_floor) * self.FLOOR_UP
-        moving = p >= self.threshold and (self.log_gate is None or ratio >= self.log_gate)
+        if self.present:   # hysteresis: lower the bar by HYST in smoothness units
+            z_stay = z + ws * self.HYST
+            p_eff = 1.0 / (1.0 + np.exp(-z_stay))
+        else:
+            p_eff = p
+        moving = p_eff >= self.threshold and (self.log_gate is None or ratio >= self.log_gate)
         if moving:
             self.on_cnt += 1; self.off_cnt = 0
             if self.on_cnt >= self.ON_N:

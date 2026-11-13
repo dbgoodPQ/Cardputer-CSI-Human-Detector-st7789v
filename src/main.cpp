@@ -8,8 +8,9 @@
 //   * External Waveshare 2" ST7789V (top): range cone or ZONES list (key .).
 //   * Built-in screen (bottom): status, CONTACT/CLEAR banner, zone chips, graph.
 //
-// Keys:  c = calibrate nodes   x = drop calibration   , / = threshold -/+
-//        n = cone zone          r = 5 m / 10 m         . = view   ` = settings
+// Keys:  , / = sensitivity (v2 cut-off -/+, sent to every node)
+//        n = cone zone   r = 5 m / 10 m   . = view   ` = settings
+// No calibration: v2 nodes need none.
 // =============================================================================
 #include <M5Cardputer.h>
 #include <M5Unified.h>
@@ -18,6 +19,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include "esp_wifi.h"
+#include "fw_version.h"
 
 static bool  wifiReady = false;
 static char  wifiIP[16] = "---";
@@ -27,7 +29,10 @@ static LGFX_ExtST7789  extPanel;                       // external Waveshare 2" 
 static M5Canvas        topCanvas(&extPanel);           // top render buffer (240x180)
 static bool            extReady   = false;
 static bool            gRange10   = false;  // range cone: false = 5 m / 1 m lines, true = 10 m / 2 m
-static float           gThreshold = 0.15f;   // detection threshold, sent to every node
+// v2 sensitivity = smoothness cut-off sent to every node (C,SENS). Lower = more
+// sensitive. Default = the tuned value (docs/V2_ROADMAP.md).
+static const float     kSensDefault = 0.42f, kSensMin = 0.30f, kSensMax = 0.60f, kSensStep = 0.02f;
+static float           gSens = kSensDefault;
 static const float     EXT_ZOOM   = 320.0f / 240.0f;   // 240x180 * 1.333 = 320x240, fills panel
 
 // ── Color palettes & runtime settings ─────────────────────────────────────────
@@ -94,7 +99,7 @@ static void saveSettings() {
     prefs.putUChar("palette",   gColorIdx);
     prefs.putUChar("bright",    gBright);
     prefs.putUChar("extbright", gExtBright);
-    prefs.putUChar("thresh",    (uint8_t)lroundf(gThreshold * 100));
+    prefs.putUChar("sens",      (uint8_t)lroundf(gSens * 100));   // v1 "thresh" no longer used
     prefs.putUChar("range10",   gRange10 ? 1 : 0);
     prefs.end();
 }
@@ -105,10 +110,10 @@ static void loadSettings() {
     gColorIdx  = prefs.getUChar("palette",   0);
     gBright    = prefs.getUChar("bright",   80);
     gExtBright = prefs.getUChar("extbright",80);
-    uint8_t thr = prefs.getUChar("thresh", (uint8_t)lroundf(gThreshold * 100));
+    uint8_t sens = prefs.getUChar("sens", (uint8_t)lroundf(kSensDefault * 100));
     gRange10   = prefs.getUChar("range10", 0) != 0;
     prefs.end();
-    if (thr >= 5 && thr <= 95) gThreshold = thr / 100.0f;
+    if (sens >= lroundf(kSensMin * 100) && sens <= lroundf(kSensMax * 100)) gSens = sens / 100.0f;
     if (gColorIdx >= kNumPalettes) gColorIdx = 0;
     if (gBright    < 10 || gBright    > 100) gBright    = 80;
     if (gExtBright < 10 || gExtBright > 100) gExtBright = 80;
@@ -458,8 +463,11 @@ static void drawMenu() {
     canvas.fillRect(0, H - 14, W, 14, cBar);
     canvas.drawFastHLine(0, H - 14, W, gColA);
     canvas.setTextColor(cDim, cBar);
-    const char* hint = ";/.:nav  ,//:change  enter:open  `:save";
-    canvas.drawString(hint, (W - canvas.textWidth(hint)) / 2, H - 11);
+    const char* hint = ";/.:nav ,//:change enter:open `:save";
+    canvas.drawString(hint, 4, H - 11);
+    const char* ver = "v" FW_VERSION;
+    canvas.setTextColor(gColB, cBar);
+    canvas.drawString(ver, W - canvas.textWidth(ver) - 4, 3);
 
     canvas.pushSprite(0, 0);
 }
@@ -525,7 +533,6 @@ static void drawBottom() {
   if (gToast && now - gToastMs < 2000)  lbl = gToast;
   else if (!wifiReady)                  lbl = "NO WIFI";
   else if (gNodeCount == 0)             lbl = "NO NODES";
-  else if (anyNodeCalibrating(now))     lbl = "NODES: CAL";
   else if (present) {
     snprintf(zoneLbl, sizeof(zoneLbl), ">> %s <<", getZone(zAct, now).name);
     lbl = zoneLbl;
@@ -539,7 +546,7 @@ static void drawBottom() {
   int gy = 54, gh = 50;
   if (gNodeCount > 0) { drawZoneChips(54, now); gy = 69; gh = 35; }
   canvas.drawRect(gx, gy, gw, gh, cBorder);
-  int ty = gy + gh - 1 - (int)(gThreshold * (gh - 2));
+  int ty = gy + gh - 1 - (int)(0.5f * (gh - 2));     // v2 motion level is 0.5 at the cut-off
   canvas.drawFastHLine(gx + 1, ty, gw - 2, canvas.color565(180, 0, 180));
 
   int cols = gw - 2;
@@ -552,7 +559,7 @@ static void drawBottom() {
     if (barh < 0) barh = 0;
     if (barh > gh - 2) barh = gh - 2;
     if (barh == 0) continue;
-    uint16_t col = (v > gThreshold)
+    uint16_t col = (v > 0.5f)
       ? canvas.color565(220,   0, 200)
       : canvas.color565(  0, 160, 200);
     canvas.drawFastVLine(gx + 1 + xoff + i, gy + gh - 1 - barh, barh, col);
@@ -566,14 +573,14 @@ static void drawBottom() {
   // footer
   char foot[48];
   if (gNodeCount > 0)
-    snprintf(foot, sizeof(foot), "mot %3d%% %-10s thr %2d%%",
-             (int)(zMax * 100), getZone(zMaxIdx, now).name, (int)(gThreshold * 100));
+    snprintf(foot, sizeof(foot), "mot %3d%% %-10s cut %.2f",
+             (int)(zMax * 100), getZone(zMaxIdx, now).name, gSens);
   else
-    snprintf(foot, sizeof(foot), "mot  --%%             thr %2d%%", (int)(gThreshold * 100));
+    snprintf(foot, sizeof(foot), "mot  --%%             cut %.2f", gSens);
   canvas.setTextColor(cCyan, TFT_BLACK);
   canvas.drawString(foot, 4, gy + gh + 4);
   canvas.setTextColor(cPurple, TFT_BLACK);
-  canvas.drawString(".view c:cal x:uncal ,/:thr `:menu", 4, gy + gh + 15);
+  canvas.drawString(".:view  ,/:sensitivity  `:menu", 4, gy + gh + 15);
 
   // outer frame + corner dots
   canvas.drawFastHLine(0,   0,   W, cBorder);
@@ -614,7 +621,7 @@ static void drawTop() {
   // The cone shows one node's zone, or AUTO (key n). No nodes = empty cone.
   const bool     noNodes = gNodeCount == 0;
   const int      coneZ   = coneZoneNow(now);
-  const ZoneView zv      = noNodes ? ZoneView{"NO NODES", false, false, 0.0f, 0, 0, 0, "-"}
+  const ZoneView zv      = noNodes ? ZoneView{"NO NODES", false, false, false, 0.0f, 0, 0, 0, "-"}
                                    : getZone(coneZ, now);
   const bool     linkOk  = zv.online;
   const bool     present = zv.present;
@@ -671,8 +678,10 @@ static void drawTop() {
     strcpy(big, "OFFLINE"); bigCol = TFT_RED; small = "no report from this node";
   } else if (strcmp(zMode, "NO CSI") == 0) {
     strcpy(big, "NO SIGNAL"); bigCol = TFT_RED; small = "node gets no router frames";
-  } else if (strcmp(zMode, "CAL") == 0) {
+  } else if (strcmp(zMode, "CAL") == 0) {                     // v1 node only
     strcpy(big, "CALIBRATING"); bigCol = topCanvas.color565(255, 140, 0); small = "leave the room";
+  } else if (present && zv.held) {
+    strcpy(big, "MOTION"); bigCol = topCanvas.color565(255, 120, 255); small = "a few seconds ago";
   } else if (present) {
     snprintf(big, sizeof(big), "MOTION %d%%", (int)lroundf(zMotion * 100));
     bigCol = topCanvas.color565(255, 120, 255); small = "distance unknown (Wi-Fi only)";
@@ -750,12 +759,17 @@ static void drawTop() {
 // --------------------------------------------------------------------------
 #include "zones_ui.h"        // ZONES view + NODES menu
 
-static void changeThreshold(float d) {
-  gThreshold += d;
-  if (gThreshold < 0.05f) gThreshold = 0.05f;
-  if (gThreshold > 0.95f) gThreshold = 0.95f;
-  sendNodeThreshold();
+// , / : move the v2 cut-off (lower = more sensitive) and send it to every node.
+static void changeSens(float d) {
+  gSens += d;
+  if (gSens < kSensMin) gSens = kSensMin;
+  if (gSens > kSensMax) gSens = kSensMax;
+  gSens = roundf(gSens * 100.0f) / 100.0f;
+  sendNodeSens();
   saveSettings();
+  static char msg[20];
+  snprintf(msg, sizeof(msg), "CUT %.2f", gSens);
+  toast(msg);
 }
 
 static void serviceKeys() {
@@ -780,17 +794,8 @@ static void serviceKeys() {
         if (gViewMode != 0) gViewMode = 0;            // first press just shows the cone
         else coneNext();
       }
-      else if (c == 'c' || c == 'C') {                // calibrate every node (again = cancel)
-        if (!wifiReady)           toast("NO WIFI");
-        else if (gNodeCount == 0) toast("NO NODES");
-        else if (anyNodeCalibrating(millis())) { sendNodeCmd("C,CALSTOP"); toast("CAL STOPPED"); }
-        else                                   { sendNodeCmd("C,CAL");     toast("CAL SENT"); }
-      }
-      else if (c == 'x' || c == 'X') {
-        if (wifiReady && gNodeCount > 0) { sendNodeCmd("C,UNCAL"); toast("CAL CLEARED"); }
-      }
-      else if (c == ',') changeThreshold(-0.05f);
-      else if (c == '/') changeThreshold(+0.05f);
+      else if (c == ',') changeSens(-kSensStep);   // more sensitive
+      else if (c == '/') changeSens(+kSensStep);   // less sensitive
     }
   }
 }

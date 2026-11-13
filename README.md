@@ -20,7 +20,18 @@ pairs and manages the nodes, and shows what they report on both screens.
 
 Removed from the Cardputer in v2: its own CSI sensing and calibration, the `ME` zone, the IMU
 device-motion guard, the 3D view and camera icons, and the inherited fake-data / UDP / UART builds.
-Next: a reworked motion-detection method on the nodes. See [`docs/V2_ROADMAP.md`](docs/V2_ROADMAP.md).
+
+**Firmware 2.1:** the nodes use a new motion detector (v2) that needs **no calibration**. It looks
+at how *smoothly* the Wi-Fi signal changes over the last second (a walking person makes smooth
+changes, an empty room only noise). Tested on 24 recordings in 3 rooms over 2 days: no false alarm
+in 43 minutes of empty rooms, walking detected about 99% of the time. Details and data:
+[`docs/V2_ROADMAP.md`](docs/V2_ROADMAP.md).
+
+**Which file to flash:** every firmware file carries its version, e.g.
+`csi-node-esp32-2.1.0-dev1-app.bin`. Update with the `-app.bin` files at `0x10000` (keeps Wi-Fi and
+pairing); the files without `-app` go at `0x0` and erase the saved Wi-Fi (nodes must be paired
+again). The Cardputer shows its version in the settings menu, and each node's version in
+NODES > node.
 
 The table below describes the v1 changes from the original project.
 
@@ -120,13 +131,11 @@ The nodes join the same network when you pair them, so pick your home 2.4 GHz Wi
 
 | Key | Action |
 |-----|--------|
-| `c` | Calibrate every node: leave the rooms within 3 s, keep them empty for 10 s. `c` again (while a node is calibrating) cancels |
-| `x` | Drop the nodes' calibration, back to `AUTO` |
 | `r` | Range cone scale: 5 m (1 m lines) / 10 m (2 m lines) |
 | `n` | Range cone zone: AUTO (default, follows the zone with the strongest motion) → each node → AUTO. Shows the cone first if the zones view is open |
 | `.` | External screen view: range cone ↔ zones |
-| `,` | Decrease detection threshold (5% steps, sent to every node) |
-| `/` | Increase detection threshold (5% steps, sent to every node) |
+| `,` | More sensitive: lowers the motion cut-off by 0.02 (default 0.42, range 0.30-0.60), sent to every node |
+| `/` | Less sensitive: raises the cut-off by 0.02 |
 | `` ` `` | Open settings menu (EXT PANEL = external backlight, NODES = sensor nodes) |
 
 ---
@@ -145,12 +154,12 @@ Through-wall sensing is weak.
 - Put each node where it will stay; moving a node changes its signal far more than a person does.
   The router should be in or near the room, with the area you want to watch between the node and the router.
 - The status pill shows how many nodes are online, e.g. `3/3 ON` (green), `2/3 ON` (orange: one is
-  offline, or a node is calibrating), `NO NODES` / `NO WIFI` (red).
-- Each node's own state shows in the ZONES view and the NODES menu: `CAL` (calibrating),
-  `NO SIGNAL` (that node gets no router frames), `OFFLINE` (no report for 10 s).
-- Calibrate (`c`) once the nodes are in place. The banner shows `CAL SENT`, then `NODES: CAL` while they measure.
-- After calibrating, an empty room should sit near 0% motion. If you get false contacts, raise the
-  threshold with `/`; if you're missed, lower it with `,`.
+  offline), `NO NODES` / `NO WIFI` (red).
+- Each node's own state shows in the ZONES view and the NODES menu: `NO SIGNAL` (that node gets no
+  router frames), `OFFLINE` (no report for 10 s). NODES > node also shows its firmware version.
+- No calibration: a node works as soon as it's online. Contact starts after about 2.5 s of steady
+  motion; a room stays marked for 10 s after the last motion (display hold), then clears.
+- If you get false contacts, make it less sensitive with `/`; if you're missed, more sensitive with `,`.
 
 ---
 
@@ -160,9 +169,11 @@ ESP32-WROOM-32 / WROOM-32D boards are the sensors, one per room (up to 6). Each 
 your Wi-Fi, pings the router and measures motion on its own link, then reports to the Cardputer
 about 10 times a second. The Cardputer shows every room as a **zone**.
 
-**Flash a node:** Actions tab → latest **Build firmware** run → `csi-node-esp32` artifact. Flash
-`csi-node-esp32.bin` at `0x0` with [ESP Web Flasher](https://esptool.spacehuhn.com/) (or
-`cd tools/node_esp32 && pio run -t upload`). Every node gets the same firmware.
+**Flash a node:** from a release (or Actions tab → latest **Build firmware** run → the
+`csi-node-esp32-<version>` artifact). New board: `csi-node-esp32-<version>.bin` at `0x0`. Update of a
+paired node: `csi-node-esp32-<version>-app.bin` at `0x10000` (keeps the pairing). Use
+[ESP Web Flasher](https://esptool.spacehuhn.com/) (or `cd tools/node_esp32 && pio run -t upload`).
+Every node gets the same firmware; at boot its serial monitor shows `# CSI node fw <version>`.
 
 **Pair it:**
 1. Power the node near the Cardputer. A new node starts in setup mode (its LED blinks slowly, if the board has one).
@@ -170,7 +181,7 @@ about 10 times a second. The Cardputer shows every room as a **zone**.
 3. Type a name (up to 10 letters, e.g. `KITCHEN`) and press Enter. The Cardputer sends it your Wi-Fi
    details over the air (ESP-NOW, AES-encrypted); the node saves them, joins the Wi-Fi and shows up as
    **ONLINE**. Several boards waiting at once: `tab` switches between them.
-4. Put it in its room and calibrate (`c`).
+4. Put it in its room. No calibration needed.
 
 **Manage nodes** (`` ` `` → **NODES**): live status of each node; open one to **RENAME** it,
 **BLINK LED** to find the board, or **REMOVE** it (an online node goes back to setup mode).
@@ -186,19 +197,16 @@ router sees little. Nodes need USB power (about 100–150 mA each).
 - External screen, range cone: `n` picks which zone it shows (name at the top left), or **AUTO**,
   which follows the zone with the strongest motion and stays on it until another one is clearly stronger.
   A badge at the bottom left says which mode is on: **AUTO** (filled) or **MANUAL** (outlined, zone picked with `n`).
-- External screen, **ZONES** view (`.`): one row per node. Magenta = motion above the
-  threshold, `OFFLINE` when a node hasn't reported for 10 s.
+- External screen, **ZONES** view (`.`): one row per node. Magenta = motion (or within 10 s of
+  it), `OFFLINE` when a node hasn't reported for 10 s.
 - Cardputer screen: the banner names the most active zone (`>> KITCHEN <<`), chips show every zone
   (magenta = motion, outline = clear, grey = offline), the graph follows the strongest zone.
 - The node's LED lights while it detects motion (handy when placing it).
 
-**Calibration:** `c` calibrates all nodes at the same time, so every watched room should be empty
-for those 13 seconds.
-
 **Security note:** the Wi-Fi password is sent once, only while you pair, encrypted with a key built
 into the firmware. Because this firmware is public, someone who knows it and records that exact
 moment nearby could decrypt it. To use your own key, build both firmwares with
-`-DNODE_PAIR_KEY=\"16-characters!!\"` (same value on both). Node commands (calibrate, blink, remove)
+`-DNODE_PAIR_KEY=\"16-characters!!\"` (same value on both). Node commands (sensitivity, blink, remove)
 are accepted from anyone on your local network.
 
 ---

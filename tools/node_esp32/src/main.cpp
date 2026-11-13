@@ -4,9 +4,10 @@
 // from the Cardputer (settings > NODES > ADD NODE). The Cardputer sends the
 // Wi-Fi details over ESP-NOW, encrypted (see include/node_proto.h).
 //
-// Run mode: joins the Wi-Fi, pings the router 100x/s and measures motion from
-// the router's CSI, then broadcasts its result over UDP 10x/s. The Cardputer
-// names the node and shows it as a zone.
+// Run mode: joins the Wi-Fi, pings the router 50x/s and measures motion from
+// the router's CSI with the v2 detector (include/csi_v2.h: smoothness of the
+// subcarrier spread over the last second, no calibration), then broadcasts its
+// result over UDP 10x/s. The Cardputer names the node and shows it as a zone.
 // Raw CSI logging (v2): a PC running tools/csi_lab/record.py sends
 // C,LOG,<mac>,<port> and the node streams every router CSI packet to it.
 // LED: on while motion is detected; fast blink when the Cardputer asks (BLINK LED).
@@ -24,13 +25,15 @@
 #include "lwip/ip_addr.h"
 #include "freertos/queue.h"
 #include "node_proto.h"
+#include "csi_v2.h"
+#include "fw_version.h"
 
 #ifndef NODE_LED_PIN
 #define NODE_LED_PIN 2
 #endif
 #define BOOT_PIN 0
 
-static const char* kFwVer = "2.0-dev3";
+static const char* kFwVer = FW_VERSION;
 
 static uint8_t gMyMac[6];
 static char    gMyHex[13];
@@ -176,40 +179,21 @@ static volatile uint32_t gCsiDrop  = 0;   // queue full (diagnostic, sent in raw
 static esp_ping_handle_t gPing     = nullptr;
 static bool              gSensing  = false;
 
-static const int   kSub        = 52;
-// v2 phase 2: 100 pings/s, at most one packet per 10 ms slot (radio clock).
-// The v1 window doubles to 50 packets so it still spans ~0.5 s.
-static const int      kPingHz   = 100;
-static const uint32_t kSlotUs   = 10000;
-static const int      kCsiWin   = 50;
-static uint32_t       gLastSlot = 0xFFFFFFFFu;
-static float       gShape[kCsiWin][kSub];
-static int         gWinIdx     = 0;
-static int         gWinFill    = 0;
-static float       gCsiMetric  = 0.0f;
-static float       gCsiMotion  = 0.0f;
+// Ping rate: 50/s by default (v2 was tuned at 50); C,RATE switches it at run
+// time (not saved) so recordings can be made at other rates.
+static const int      kPingHzDefault = 50;
+static int            gPingHz   = kPingHzDefault;
+static csiv2::FrameGate gGate;
+static csiv2::Detector  gV2;
 static int8_t      gCsiRssi    = -80;
 static float       gRssiEma    = -80.0f;
-static float       gFloor      = 0.0f;
-static uint32_t    gLastPktMs  = 0;
 static uint16_t    gPktRate    = 0;
-static float       gThreshold  = 0.15f;     // set by the Cardputer (C,THR)
-static const float kCsiSpan    = 4.0f;
-static const float kAutoMargin = 2.0f;
-
-static bool     gCalibrated = false;
-static float    gCalRef     = 0.0f;
-static const uint32_t kCalLeadMs = 3000;
-static const uint32_t kCalMeasMs = 10000;
-static uint8_t  gCalPhase = 0;
-static uint32_t gCalT0    = 0;
-static double   gCalSum = 0, gCalSq = 0;
-static uint32_t gCalN = 0, gCalCsi0 = 0;
 
 static WiFiUDP  gUdp;
 static bool     gUdpOn     = false;
 static uint32_t gBlinkUntil = 0;
 static bool     gPresent   = false;
+static float    gMotion    = 0.0f;   // v2 probability, shown as motion level
 
 static void csiCallback(void*, wifi_csi_info_t* info) {
     if (!info || !info->buf || info->len < 128 || !gBssidOk || !gCsiQ) return;
@@ -224,93 +208,45 @@ static void csiCallback(void*, wifi_csi_info_t* info) {
     else gCsiDrop++;
 }
 
-// Frame-kind lock: every second the most common kind of router frame (normally
-// the 11n ping replies) becomes the only one used; the window restarts when it changes.
-static uint16_t gCatCnt[32];
-static int      gLockCat = -1;
-static uint32_t gCatT0   = 0;
-
-static bool csiKindOk(const CsiPkt& pk, uint32_t now) {
-    gCatCnt[pk.cat & 31]++;
-    if (msSince(now, gCatT0) >= 1000) {
-        int best = -1; uint16_t bc = 0;
-        for (int i = 0; i < 32; i++) if (gCatCnt[i] > bc) { bc = gCatCnt[i]; best = i; }
-        const uint16_t cur = gLockCat >= 0 ? gCatCnt[gLockCat] : 0;
-        if (best >= 0 && bc >= 5 && best != gLockCat && cur < bc / 2) {
-            gLockCat = best; gWinFill = 0; gWinIdx = 0;
-        }
-        memset(gCatCnt, 0, sizeof(gCatCnt));
-        gCatT0 = now;
+// Frame gate (kind lock + 10 ms slots) and v2 detector: see include/csi_v2.h.
+static uint8_t processCsiPkt(const CsiPkt& pk, uint32_t now, float* spread) {
+    *spread = 0.0f;
+    const uint8_t st = gGate.admit(pk.cat, pk.rx.timestamp, now);
+    if (gGate.lockChanged) { gGate.lockChanged = false; gV2.clearHistory(); }
+    if (st != csiv2::kUsed) return st;
+    const uint8_t r = gV2.addPacket(pk.buf, now, spread);
+    if (r == csiv2::kUsed) {
+        gRssiEma += ((float)pk.rx.rssi - gRssiEma) * 0.1f;
+        gCsiRssi  = (int8_t)lroundf(gRssiEma);
     }
-    return gLockCat < 0 || pk.cat == gLockCat;
-}
-
-// Result of processCsiPkt (also logged in raw CSI records).
-enum : uint8_t { kPktKindSkipped = 0, kPktWeak = 1, kPktFilling = 2, kPktMetric = 3, kPktSlotSkipped = 4 };
-
-static uint8_t processCsiPkt(const CsiPkt& pk, uint32_t now) {
-    if (!csiKindOk(pk, now)) return kPktKindSkipped;
-    // time slots: keep the first packet of each 10 ms slot of the radio clock
-    const uint32_t timeSlot = pk.rx.timestamp / kSlotUs;
-    if (timeSlot == gLastSlot) return kPktSlotSkipped;
-    gLastSlot = timeSlot;
-    float amp[kSub];
-    float sum = 0.0f;
-    int   j   = 0;
-    for (int k = 1; k <= 63; k++) {
-        if (k > 26 && k < 38) continue;
-        float a = (float)pk.buf[2*k], b = (float)pk.buf[2*k + 1];
-        amp[j] = sqrtf(a*a + b*b);
-        sum += amp[j++];
-    }
-    float mean = sum / kSub;
-    if (mean < 0.5f) return kPktWeak;
-    float inv = 1.0f / mean;
-    float* slot = gShape[gWinIdx];
-    for (int i = 0; i < kSub; i++) slot[i] = amp[i] * inv;
-    gWinIdx = (gWinIdx + 1) % kCsiWin;
-    if (gWinFill < kCsiWin) gWinFill++;
-    gLastPktMs = now;
-    gRssiEma  += ((float)pk.rx.rssi - gRssiEma) * 0.1f;
-    gCsiRssi   = (int8_t)lroundf(gRssiEma);
-    if (gWinFill < kCsiWin) return kPktFilling;
-    float acc = 0.0f;
-    for (int i = 0; i < kSub; i++) {
-        float m = 0.0f, q = 0.0f;
-        for (int w = 0; w < kCsiWin; w++) { float v = gShape[w][i]; m += v; q += v*v; }
-        m /= kCsiWin;
-        float var = q / kCsiWin - m*m;
-        if (var > 0.0f) acc += var;
-    }
-    gCsiMetric = acc / kSub;
-    if (gCalPhase == 2) { const double v = gCsiMetric; gCalSum += v; gCalSq += v * v; gCalN++; }
-    return kPktMetric;
+    return r;
 }
 
 // ── raw CSI logging to a PC (tools/csi_lab/record.py) ─────────────────────────
 // The PC sends C,LOG,<mac>,<port> (repeated every ~2 s as a keep-alive); the node
 // streams every router CSI packet to the sender's IP:<port>, 8 records per
 // datagram. Stops after kLogTimeoutMs without a refresh, or on C,LOG,<mac>,0.
-// Format (little-endian), version 2 (v1 = same without the last 4 header bytes):
+// Format (little-endian), version 3 (v2 = same header, metric = v1 metric;
+// v1 = header without the last 4 bytes):
 //   datagram = LogHdr + count * LogRec
 #pragma pack(push, 1)
 struct LogHdr {
     char     magic[4];      // "CSIL"
-    uint8_t  ver;           // 1
+    uint8_t  ver;           // 3
     uint8_t  count;         // records in this datagram
     uint8_t  mac[6];        // node station MAC
     uint32_t dseq;          // datagram sequence
     uint32_t drops;         // CSI packets lost to a full queue since boot
     uint8_t  ping_hz;       // gateway pings per second
-    uint8_t  v1_win;        // v1 window, packets
+    uint8_t  v1_win;        // v1 window, packets (0 = no v1 on this firmware)
     uint8_t  slot_ms;       // slot admission (0 = off)
-    uint8_t  flags;         // reserved, 0
+    uint8_t  flags;         // bit 0: metric = v2 spread after Hampel
 };
 static_assert(sizeof(LogHdr) == 24, "LogHdr layout");
 struct LogRec {
     uint32_t rx_us;         // rx_ctrl.timestamp (radio clock, us)
     uint32_t ms;            // millis() when processed (detector "now")
-    float    metric;        // detector metric after this packet (v1)
+    float    metric;        // v2: spread of this packet after Hampel (0 if not used)
     int8_t   rssi;
     int8_t   noise;
     uint8_t  rate;
@@ -319,7 +255,7 @@ struct LogRec {
     uint8_t  cwb;
     uint8_t  stbc;
     uint8_t  channel;
-    uint8_t  status;        // kPkt* result of processCsiPkt (4 = second packet in a slot)
+    uint8_t  status;        // 0 kind skipped, 1 weak, 3 used, 4 second packet in a slot
     uint8_t  sgi;
     uint8_t  lock_cat;      // locked frame kind (255 = none yet)
     uint8_t  cat;           // this packet's frame kind
@@ -342,8 +278,8 @@ static void logFlush() {
     if (!gLogN || !gLogPort || !gUdpOn) { gLogN = 0; return; }
     LogHdr h;
     memcpy(h.magic, "CSIL", 4);
-    h.ver = 2; h.count = gLogN;
-    h.ping_hz = kPingHz; h.v1_win = kCsiWin; h.slot_ms = kSlotUs / 1000; h.flags = 0;
+    h.ver = 3; h.count = gLogN;
+    h.ping_hz = (uint8_t)gPingHz; h.v1_win = 0; h.slot_ms = csiv2::FrameGate::kSlotUs / 1000; h.flags = 1;
     memcpy(h.mac, gMyMac, 6);
     h.dseq = ++gLogDseq; h.drops = gCsiDrop;
     memcpy(gLogBuf, &h, sizeof(h));
@@ -353,14 +289,14 @@ static void logFlush() {
     gLogN = 0;
 }
 
-static void logPacket(const CsiPkt& pk, uint8_t status, uint32_t now) {
+static void logPacket(const CsiPkt& pk, uint8_t status, float spread, uint32_t now) {
     if (!gLogPort) return;
     LogRec r;
-    r.rx_us = pk.rx.timestamp; r.ms = now; r.metric = gCsiMetric;
+    r.rx_us = pk.rx.timestamp; r.ms = now; r.metric = spread;
     r.rssi = pk.rx.rssi; r.noise = pk.rx.noise_floor; r.rate = pk.rx.rate;
     r.sig_mode = pk.rx.sig_mode; r.mcs = pk.rx.mcs; r.cwb = pk.rx.cwb; r.stbc = pk.rx.stbc;
     r.channel = pk.rx.channel; r.status = status; r.sgi = pk.rx.sgi;
-    r.lock_cat = gLockCat < 0 ? 255 : (uint8_t)gLockCat; r.cat = pk.cat;
+    r.lock_cat = gGate.lockCat < 0 ? 255 : (uint8_t)gGate.lockCat; r.cat = pk.cat;
     memcpy(r.buf, pk.buf, 128);
     if (gLogN == 0) gLogFirstMs = now;
     memcpy(gLogBuf + sizeof(LogHdr) + gLogN * sizeof(LogRec), &r, sizeof(r));
@@ -390,7 +326,7 @@ static void startPing() {
     esp_ping_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.count           = ESP_PING_COUNT_INFINITE;
-    cfg.interval_ms     = 1000 / kPingHz;
+    cfg.interval_ms     = 1000 / gPingHz;
     cfg.timeout_ms      = 1000;
     cfg.data_size       = 8;
     cfg.ttl             = 64;
@@ -401,7 +337,7 @@ static void startPing() {
     memset(&cbs, 0, sizeof(cbs));
     if (esp_ping_new_session(&cfg, &cbs, &gPing) == ESP_OK) esp_ping_start(gPing);
     else gPing = nullptr;
-    Serial.printf("# ping %s: %s\n", gw.toString().c_str(), gPing ? "on" : "FAILED");
+    Serial.printf("# ping %s %d/s: %s\n", gw.toString().c_str(), gPingHz, gPing ? "on" : "FAILED");
 }
 
 __attribute__((unused)) static void IRAM_ATTR promiscuousRxCb(void*, wifi_promiscuous_pkt_type_t) {}
@@ -412,14 +348,14 @@ static void startSensing() {
     gBssidOk = false;
     if (bssid) { memcpy(gBssid, bssid, 6); gBssidOk = true; }
     xQueueReset(gCsiQ);
-    gWinIdx = 0; gWinFill = 0; gCsiMetric = 0.0f; gCsiMotion = 0.0f;
-    gFloor = 0.0f; gLastPktMs = 0; gRssiEma = (float)WiFi.RSSI();
-    gLastSlot = 0xFFFFFFFFu;
+    const double cut = gV2.cut > 0 ? gV2.cut : csiv2::kCutDefault;   // keep SENS across reconnects
+    gV2.reset(); gV2.cut = cut;
+    gGate.reset(millis());
+    gPresent = false; gMotion = 0.0f; gRssiEma = (float)WiFi.RSSI();
     esp_wifi_set_ps(WIFI_PS_NONE);
     // No promiscuous mode: only router frames addressed to this node (its ping
     // replies), not the ones sent to other devices. Same as the Cardputer.
     esp_wifi_set_promiscuous(false);
-    gLockCat = -1; gCatT0 = millis(); memset(gCatCnt, 0, sizeof(gCatCnt));
     wifi_csi_config_t cfg = {};
     cfg.lltf_en = true; cfg.htltf_en = true; cfg.stbc_htltf2_en = true;
     cfg.ltf_merge_en = true; cfg.channel_filter_en = true;
@@ -442,53 +378,32 @@ static void stopSensing() {
     esp_wifi_set_promiscuous(false);
     if (gUdpOn) { gUdp.stop(); gUdpOn = false; }
     gSensing = false;
-    gCsiMotion = 0.0f;
-    gCalPhase = 0;
-}
-
-static void startCal() {
-    gCalPhase = 1; gCalT0 = millis();
-    Serial.println("# calibration requested");
-}
-
-// Returns true while calibrating.
-static bool stepCal(uint32_t now, bool haveCsi) {
-    if (gCalPhase == 1) {
-        if (msSince(now, gCalT0) < (int32_t)kCalLeadMs) return true;
-        gCalPhase = 2; gCalT0 = now; gCalN = 0; gCalCsi0 = gCsiCount;
-        gCalSum = gCalSq = 0;
-        return true;
-    }
-    if (gCalPhase != 2) return false;
-    (void)haveCsi;                                  // samples come from processCsiPkt
-    if (msSince(now, gCalT0) < (int32_t)kCalMeasMs) return true;
-    gCalPhase = 0;
-    const uint32_t frames = gCsiCount - gCalCsi0;
-    if (frames < 80 || gCalN < 50) {
-        Serial.printf("# CAL failed: samples=%lu frames=%lu\n", (unsigned long)gCalN, (unsigned long)frames);
-        return false;
-    }
-    const double m  = gCalSum / gCalN;
-    const double sd = sqrt(fmax(0.0, gCalSq / gCalN - m * m));
-    gCalRef     = (float)fmax(m + 3.0 * sd, 1e-7);
-    gCalibrated = true;
-    Serial.printf("# CAL done: ref=%.6f\n", gCalRef);
-    return false;
+    gMotion = 0.0f;
+    gPresent = false;
 }
 
 static void handleCommand(char* line, const IPAddress& from) {
-    // C,CAL | C,CALSTOP | C,UNCAL | C,THR,<f> | C,BLINK,<mac> | C,FORGET,<mac>
-    // C,LOG,<mac>,<port>  (port 0 = stop; from a PC, see tools/csi_lab)
+    // C,SENS,<cut> (v2 smoothness cut-off, from the Cardputer) | C,BLINK,<mac> | C,FORGET,<mac>
+    // C,LOG,<mac>,<port> (port 0 = stop) | C,RATE,<mac>,<hz> (pings/s, not saved)  -- from a PC
+    // v1 commands (CAL, CALSTOP, UNCAL, THR) are ignored: v2 needs no calibration.
     if (strncmp(line, "C,", 2) != 0) return;
     char* cmd = line + 2;
     char* arg = strchr(cmd, ',');
     if (arg) *arg++ = '\0';
-    if      (strcmp(cmd, "CAL") == 0)     startCal();
-    else if (strcmp(cmd, "CALSTOP") == 0) gCalPhase = 0;
-    else if (strcmp(cmd, "UNCAL") == 0)   { gCalPhase = 0; gCalibrated = false; }
-    else if (strcmp(cmd, "THR") == 0 && arg) {
-        float t = atof(arg);
-        if (t >= 0.05f && t <= 0.95f) gThreshold = t;
+    if (strcmp(cmd, "SENS") == 0 && arg) {
+        const float c = atof(arg);
+        if (c >= 0.20f && c <= 0.80f) gV2.cut = c;
+    }
+    else if (strcmp(cmd, "RATE") == 0 && arg) {
+        char* hzStr = strchr(arg, ',');
+        if (!hzStr) return;
+        *hzStr++ = '\0';
+        if (strcasecmp(arg, gMyHex) != 0) return;
+        const int hz = atoi(hzStr);
+        if (hz >= 10 && hz <= 100 && hz != gPingHz) {
+            gPingHz = hz;
+            if (gSensing) startPing();
+        }
     }
     else if (strcmp(cmd, "BLINK") == 0 && arg && strcasecmp(arg, gMyHex) == 0) gBlinkUntil = millis() + 5000;
     else if (strcmp(cmd, "FORGET") == 0 && arg && strcasecmp(arg, gMyHex) == 0) { stopSensing(); forgetAndRestart(); }
@@ -523,58 +438,34 @@ static void serviceUdp() {
     }
 }
 
-// 15 Hz: motion, presence hold, calibration; 10 Hz report.
+// v2 tick every 250 ms; report 10 Hz. No hold here: the Cardputer holds the display.
 static void serviceSensing(uint32_t now) {
-    static uint32_t last = 0, lastRep = 0, rateT0 = 0, rateCnt0 = 0, seq = 0;
-    static int      holdCnt = 0;
-    static float    heldMotion = 0.0f, outMotion = 0.0f;
-    const  int      kHold = 150;          // 10 s at 15 Hz
-    static const char* mode = "AUTO";
+    static uint32_t lastTick = 0, lastRep = 0, rateT0 = 0, rateCnt0 = 0, seq = 0;
 
     if (gCsiQ) {
         CsiPkt pk;
         int n = 0;
         while (n++ < 32 && xQueueReceive(gCsiQ, &pk, 0) == pdTRUE) {
-            const uint8_t st = processCsiPkt(pk, now);
-            logPacket(pk, st, now);
+            float spread;
+            const uint8_t st = processCsiPkt(pk, now, &spread);
+            logPacket(pk, st, spread, now);
         }
     }
     serviceLog(now);
-    if (now - last >= 66) {
-        last = now;
-        if (now - rateT0 >= 1000) { gPktRate = (uint16_t)(gCsiCount - rateCnt0); rateCnt0 = gCsiCount; rateT0 = now; }
-        const bool pktsOk  = gLastPktMs && (now - gLastPktMs) < 2000;
-        const bool haveCsi = pktsOk && gWinFill >= kCsiWin;
-        float raw = 0.0f;
-        if (haveCsi) {
-            if (gFloor <= 0.0f)           gFloor = gCsiMetric;
-            else if (gCsiMetric < gFloor) gFloor += (gCsiMetric - gFloor) * 0.2f;
-            else                          gFloor += (gCsiMetric - gFloor) * 0.0007f;
-            float ref = gCalibrated ? gCalRef : gFloor * kAutoMargin;
-            if (ref < 1e-7f) ref = 1e-7f;
-            raw = (gCsiMetric / ref - 1.0f) / kCsiSpan;
-            raw = raw < 0.0f ? 0.0f : (raw > 1.0f ? 1.0f : raw);
-        }
-        gCsiMotion += (raw - gCsiMotion) * 0.4f;
-
-        if (stepCal(now, haveCsi)) {
-            holdCnt = 0; heldMotion = 0.0f; gPresent = false; outMotion = gCsiMotion; mode = "CAL";
-        } else if (!pktsOk) {
-            holdCnt = 0; heldMotion = 0.0f; gPresent = false; outMotion = 0.0f; mode = "NO CSI";
-        } else {
-            float m = gCsiMotion;
-            if (m > gThreshold)      { holdCnt = kHold; heldMotion = m; gPresent = true; }
-            else if (holdCnt > 0)    { holdCnt--; m = heldMotion * (0.10f + 0.90f * holdCnt / kHold); gPresent = true; }
-            else                     { gPresent = false; m = 0.0f; }
-            outMotion = m;
-            mode = gCalibrated ? "RUN" : "AUTO";
-        }
+    if (msSince(now, rateT0) >= 1000) { gPktRate = (uint16_t)(gCsiCount - rateCnt0); rateCnt0 = gCsiCount; rateT0 = now; }
+    if (msSince(now, lastTick) >= (int32_t)csiv2::kTickMs) {
+        lastTick = now;
+        gV2.tick(now);
+        gPresent = gV2.present;
+        gMotion  = (float)gV2.prob;
     }
-    if (now - lastRep >= 100 && gUdpOn) {
+    if (msSince(now, lastRep) >= 100 && gUdpOn) {
         lastRep = now;
-        char line[80];
-        int n = snprintf(line, sizeof(line), "N,%s,%lu,%d,%.3f,%d,%u,%s\n", gMyHex, (unsigned long)(++seq),
-                         gPresent ? 1 : 0, outMotion, (int)gCsiRssi, (unsigned)gPktRate, mode);
+        // N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<mode>,<detector>,<fw>
+        char line[96];
+        int n = snprintf(line, sizeof(line), "N,%s,%lu,%d,%.3f,%d,%u,%s,2,%s\n", gMyHex, (unsigned long)(++seq),
+                         gPresent ? 1 : 0, gMotion, (int)gCsiRssi, (unsigned)gPktRate,
+                         gV2.ready ? "RUN" : "NO CSI", kFwVer);
         gUdp.beginPacket(IPAddress(255, 255, 255, 255), nodeproto::kReportPort);
         gUdp.write((const uint8_t*)line, n);
         gUdp.endPacket();

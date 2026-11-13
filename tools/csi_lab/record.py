@@ -89,6 +89,8 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=4213, help="local UDP port for the stream")
     ap.add_argument("--out", default="recordings", help="output folder")
     ap.add_argument("--bind", default="", help="PC IP address to use (when the PC has several adapters)")
+    ap.add_argument("--rate", type=int, default=0,
+                    help="pings/s for this recording (firmware 2.1+, e.g. 100); the node goes back to 50 after")
     args = ap.parse_args()
 
     mac = csilog.norm_mac(args.node) if args.node else None
@@ -156,6 +158,8 @@ def main() -> int:
                 if now >= t_end:
                     break
                 if now >= next_cmd:
+                    if args.rate:
+                        send_cmd(tx, ip, f"C,RATE,{mac},{args.rate}")
                     err = send_cmd(tx, ip, f"C,LOG,{mac},{args.port}")
                     if err and err != send_err:
                         print(f"\n  network error, retrying: {err}")
@@ -188,8 +192,11 @@ def main() -> int:
                     meta.update(stream)
                     csilog.write_header(f, meta)
                     header_done = True
+                    det = "v2" if stream["flags"] & 1 else f"v1 window {stream['v1_win']}"
                     print(f"\n  node streams v{stream['wire_version']}: {stream['ping_hz']} pings/s, "
-                          f"slots {stream['slot_ms']} ms, v1 window {stream['v1_win']}")
+                          f"slots {stream['slot_ms']} ms, detector {det}")
+                    if args.rate and stream["ping_hz"] != args.rate:
+                        print(f"  (asked for {args.rate} pings/s; the first packets may still be at the old rate)")
                 if last_dseq is not None and dseq > last_dseq + 1:
                     lost += dseq - last_dseq - 1
                 last_dseq = dseq
@@ -209,6 +216,8 @@ def main() -> int:
     finally:
         for _ in range(3):
             send_cmd(tx, ip, f"C,LOG,{mac},0")
+            if args.rate:
+                send_cmd(tx, ip, f"C,RATE,{mac},50")
     dur = time.monotonic() - t0
     summary = dict(meta, seconds=round(dur, 1), records=n_recs, datagrams=n_dgrams, lost_datagrams=lost,
                    queue_drops=(last_drops or 0) - (first_drops or 0),

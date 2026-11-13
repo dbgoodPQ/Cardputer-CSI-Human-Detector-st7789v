@@ -17,7 +17,9 @@ room by room. Realistic target: **presence + motion** per room.
   the inherited fake / UDP-`SQUACHNET` / UART builds.
 - Wi-Fi power save is off on the Cardputer (`onWifiUp`, `pairStop`) so the
   nodes' 10 Hz UDP broadcasts aren't delayed to DTIM beacons.
-- Plan and open work: `docs/V2_ROADMAP.md` (next: improve the nodes' motion method).
+- Plan and open work: `docs/V2_ROADMAP.md`. Firmware version: `include/fw_version.h`
+  (`FW_VERSION`, shared by both firmwares; CI/release file names use it; bump it
+  for every build the user should flash).
 - **Displays (different content per screen, NOT a clone):**
   - Top = external **Waveshare 2" ST7789V** (320x240 @ rotation `EXT_ROTATION`=1),
     `.` toggles two views:
@@ -33,11 +35,16 @@ room by room. Realistic target: **presence + motion** per room.
       row height for up to 6.
   - Bottom = built-in 1.14" (240x135): Wi-Fi IP, nodes pill (`nodesTag()`:
     `2/3 ON`, green/orange/red), banner (toast 2 s > NO WIFI > NO NODES >
-    NODES: CAL > `>> ZONE <<` > CLEAR), zone chips, strongest-zone graph,
-    threshold + key hints.
-- Keys: `c` sends `C,CAL` (or `C,CALSTOP` if any node reports CAL), `x` sends
-  `C,UNCAL`, `,` `/` threshold (sent to nodes + prefs), `n`, `r`, `.`, `` ` `` menu
-  (PALETTE, SCREEN, EXT PANEL, WIFI NET, NODES).
+    `>> ZONE <<` > CLEAR), zone chips, strongest-zone graph (0.5 line = cut-off),
+    cut-off + key hints.
+- Keys: `,` `/` sensitivity = v2 smoothness cut-off `gSens` (0.30-0.60, step 0.02,
+  default 0.42, prefs "sens", sent as `C,SENS` on change + every 5 s), `n`, `r`,
+  `.`, `` ` `` menu (PALETTE, SCREEN, EXT PANEL, WIFI NET, NODES; version top-right).
+  No `c`/`x`: v2 needs no calibration.
+- Display hold: v2 nodes report raw contact; `getZone()` keeps a zone present
+  for `kDisplayHoldMs` (10 s) after its last reported motion (`ZoneView.held` =
+  present only by hold; cone shows "MOTION / a few seconds ago"). v1 nodes
+  (8-field reports) are shown as before.
 
 ## Sensor nodes (ESP32-WROOM-32/32D, `tools/node_esp32`)
 - One generic firmware; no names/creds built in. Protocol + pairing crypto in
@@ -46,19 +53,24 @@ room by room. Realistic target: **presence + motion** per room.
   (` > NODES > ADD NODE, PS_NONE) answers SEEN → node locks channel;
   Enter sends PAIR = SSID+psk AES-128-GCM (fixed key `NODE_PAIR_KEY`, AAD = node
   MAC + Cardputer MAC); node saves, PAIR_OK, reboots into run mode.
-- Run: node CSI pipeline (v1 method, to be reworked in v2): router-BSSID frames
-  only, no promiscuous mode, 100 Hz gateway ping (fw 2.0-dev3; 50 Hz before),
-  frame-kind lock, then 10 ms slot admission on rx_ctrl.timestamp (status 4 =
-  slot skipped), 52 L-LTF data
-  subcarriers / mean (AGC cancel), shape variance over 50 frames (25 before) vs empty-room
-  ref (mean+3sd) or AUTO floor x2, 10 s hold. Modes AUTO | CAL | RUN | NO CSI; broadcasts `N,<mac>,<seq>,<pres>,<motion>,
-  <rssi>,<rate>,<mode>` on UDP 4211 at 10 Hz. Cardputer → nodes UDP 4212:
-  `C,CAL|CALSTOP|UNCAL|THR,<f>|BLINK,<mac>|FORGET,<mac>` (THR resent every 5 s).
-- Raw CSI logging (fw 2.0-dev2; 2.0-dev had a timeout bug): `C,LOG,<mac>,<port>` from a PC (keep-alive every
+- Run (fw 2.1, v2 detector, `include/csi_v2.h` shared with a PC test build):
+  router-BSSID frames only, no promiscuous mode, gateway ping 50/s (`C,RATE,<mac>,<hz>`
+  10-100, runtime only), `FrameGate` = frame-kind lock + 10 ms slots on
+  rx_ctrl.timestamp; `Detector`: spread = std/mean of 12 subcarrier amplitudes
+  (+-3,7,11,15,19,23), causal Hampel(7, 3 MAD); every 250 ms over the last 1 s:
+  smoothness = lag-1 autocorrelation; motion if smoothness >= cut (0.4166; in
+  contact: cut - 0.12); contact after 10 checks, clear after 3; NO CSI if < 20
+  packets. prob = logistic(20.74 (smooth - cut)) = motion level. No hold, no
+  calibration. Broadcasts `N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<RUN|NO CSI>,2,<fw>`
+  on UDP 4211 at 10 Hz. Cardputer → nodes UDP 4212: `C,SENS,<cut>|BLINK,<mac>|FORGET,<mac>`;
+  from a PC: `C,LOG,<mac>,<port>`, `C,RATE,<mac>,<hz>`. v1 commands ignored.
+  (v1 method up to fw 2.0-dev3: 52-subcarrier shape variance, calibration, 10 s hold.)
+- Raw CSI logging (fw 2.0-dev2+; 2.0-dev had a timeout bug): `C,LOG,<mac>,<port>` from a PC (keep-alive every
   2 s, node stops after 6 s; port 0 = stop) → node streams every router CSI packet
-  to sender IP:port as `CSIL` v2 datagrams (24 B header incl. ping_hz, v1_win,
-  slot_ms; v1 = 20 B header from fw 2.0-dev2; + up to 8 x 152 B records:
-  radio ts, millis, v1 metric, rx_ctrl fields, status, frame kind, 128 B CSI).
+  to sender IP:port as `CSIL` datagrams: wire v3 (fw 2.1) = 24 B header (ping_hz,
+  v1_win 0, slot_ms, flags bit0 = metric is v2 spread) + up to 8 x 152 B records
+  (radio ts, millis, metric, rx_ctrl fields, status 0/1/3/4, frame kind, 128 B CSI);
+  v2 (2.0-dev3) metric = v1; v1 (2.0-dev2) = 20 B header.
   Normal sensing continues. Tools: `tools/csi_lab/` (record.py, replay.py with
   an exact float32 Python port of v1 in detectors.py; recordings gitignored).
 - Cardputer side: `include/zones_core.h` (storage prefs "nodes", UDP, zones,
@@ -103,17 +115,21 @@ room by room. Realistic target: **presence + motion** per room.
   cone), `serviceKeys()`. Bottom @30 fps, top @8 fps.
 - `include/ext_panel.h` — external ST7789V panel class (`LGFX_ExtST7789`).
 - `include/node_proto.h` — node protocol + pairing crypto (shared with the node build).
+- `include/csi_v2.h` — v2 frame gate + detector (node firmware and PC parity test).
+- `include/fw_version.h` — `FW_VERSION` for both firmwares and the binary names.
 - `include/zones_core.h` — nodes storage, UDP reports/commands, zones, pairing
   plumbing, cone selection, chips, `nodesTag()`.
 - `include/zones_ui.h` — ZONES view, NODES menu, add-node flow.
 - `tools/node_esp32/` — node firmware (PlatformIO, esp32dev).
 - `tools/csi_lab/` — PC tools (Python 3.10+, numpy, matplotlib): record.py
   (raw CSI from a node), replay.py (score v1/v2, --hold/--chain/--gate, plots),
-  fit.py (v2 weights, leave-one-room-out), detectors.py (V1 exact port, V2).
+  fit.py (v2 weights, leave-one-room-out), detectors.py (V1 exact port, V2),
+  v2_host_test.cpp + v2_parity.py (compile csi_v2.h on the PC, compare with V2).
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
 
 ## Status (v2)
-✅ Cardputer is console only (this branch). Not yet tested on hardware.
+✅ Cardputer is console only (this branch). 🧪 fw 2.1.0-dev1 (v2 on nodes,
+display hold, sensitivity keys, versioned binaries) not yet tested on hardware.
 ✅ External Waveshare 2" ST7789V working (pinout confirmed by user).
 ⚠️ Libraries pinned: `M5GFX@0.2.36`, `M5Unified@0.2.29`, `M5Cardputer@1.1.1`.
 M5GFX 0.3.0's board detection probes G5/G6 (= external CS/DC) and misdetects
@@ -121,8 +137,7 @@ the ADV (rotated internal screen, dead external screen). Don't unpin without
 re-testing on hardware.
 ✅ Sensor nodes: user paired 3 nodes successfully (v1). User has 3 WROOM-32/32D
 boards, one per room.
-⚠️ Node tuning constants are first estimates: `kCsiSpan`=4, `kAutoMargin`=2,
-`kCsiWin`=25, hold 10 s, default threshold 0.15.
+✅ v2 constants tuned on 24 recordings (docs/V2_ROADMAP.md); 50 pings/s only.
 
 ## Next steps (priority order)
 1. **Rework node motion detection** (docs/V2_ROADMAP.md, goal 2, path B: our
@@ -133,10 +148,11 @@ boards, one per room.
    clear after 3, no calibration). Day 1 (9 recordings) + day 2 (15, still
    50 pings/s, fw 2.0-dev2): 0 empty-room alarms in 43 min, walking 98.9% with
    the Cardputer's 10 s hold; v1 AUTO 27-100% false. Findings in docs/V2_ROADMAP.md.
-   Phase 2 firmware done (2.0-dev3: 100/s ping, 10 ms slots, v1 window 50) but
-   not released/flashed yet (user creates the tag). Next: phase 4 plan (port v2
-   to the node), then recordings at 100/s incl. a long empty one and "next room".
-2. **Per-node calibration** from the node menu; persist calibration on the node.
+   Phase 4 done in code (fw 2.1.0-dev1). Next: user flashes the app-only files
+   (release tag v2.1.0-dev1), checks versions, records a 60 min empty (3 nodes in
+   parallel, --port 4213/4214/4215), a walk per node (v2 parity on hardware) and
+   "next room" per room; optionally --rate 100.
+2. **Signed reports and commands** (roadmap phase 5).
 3. **Presence event log** on the bottom screen with optional SD persistence.
 4. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)
    for still people + distance; dots in the range cone (design agreed).

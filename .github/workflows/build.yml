@@ -50,18 +50,36 @@ jobs:
             0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
             0x10000 $B/firmware.bin
 
+      - name: Name files with the firmware version (include/fw_version.h)
+        run: |
+          V=$(sed -n 's/.*FW_VERSION "\(.*\)".*/\1/p' include/fw_version.h)
+          test -n "$V"
+          echo "FW_VERSION=$V" >> "$GITHUB_ENV"
+          mkdir -p out
+          cp cardputer-csi-st7789v.bin                     out/cardputer-csi-st7789v-$V.bin
+          cp .pio/build/cardputer-radar-csi/firmware.bin   out/cardputer-csi-st7789v-$V-app.bin
+          cp csi-node-esp32.bin                            out/csi-node-esp32-$V.bin
+          cp tools/node_esp32/.pio/build/esp32-node/firmware.bin out/csi-node-esp32-$V-app.bin
+          {
+            echo "### Firmware $V"
+            echo "- Update, keeps Wi-Fi and pairing: \`*-$V-app.bin\` at **0x10000**"
+            echo "- New board / full reset (erases Wi-Fi, nodes must re-pair): \`*-$V.bin\` at **0x0**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload Cardputer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cardputer-csi-st7789v
+          name: cardputer-csi-st7789v-${{ env.FW_VERSION }}
           path: |
-            cardputer-csi-st7789v.bin
-            .pio/build/cardputer-radar-csi/firmware.bin
+            out/cardputer-csi-st7789v-${{ env.FW_VERSION }}.bin
+            out/cardputer-csi-st7789v-${{ env.FW_VERSION }}-app.bin
           if-no-files-found: error
 
       - name: Upload node artifact
         uses: actions/upload-artifact@v4
         with:
-          name: csi-node-esp32
-          path: csi-node-esp32.bin
+          name: csi-node-esp32-${{ env.FW_VERSION }}
+          path: |
+            out/csi-node-esp32-${{ env.FW_VERSION }}.bin
+            out/csi-node-esp32-${{ env.FW_VERSION }}-app.bin
           if-no-files-found: error

@@ -25,7 +25,13 @@ struct NodeLive {                // runtime only
     int8_t   rssi;
     uint16_t rate;
     char     mode[8];
+    uint8_t  detector;           // 1 = v1 node (hold built in), 2 = v2 (raw motion)
+    char     fw[16];             // node firmware version ("" = older than 2.1)
 };
+
+// v2 nodes report raw motion; the Cardputer keeps a zone in contact this long
+// after its last motion (v1 nodes did this themselves).
+static const uint32_t kDisplayHoldMs = 10000;
 
 static NodeCfg  gNodes[kMaxNodes];
 static NodeLive gLive[kMaxNodes];
@@ -117,7 +123,7 @@ static void sendNodeCmd(const char* fmt, ...) {
     }
 }
 
-static void sendNodeThreshold() { sendNodeCmd("C,THR,%.2f", gThreshold); }
+static void sendNodeSens() { sendNodeCmd("C,SENS,%.2f", gSens); }   // v2 smoothness cut-off
 
 static void sendNodeCmdMac(const char* cmd, int idx) {
     if (idx < 0 || idx >= gNodeCount) return;
@@ -128,12 +134,12 @@ static void sendNodeCmdMac(const char* cmd, int idx) {
 
 // ── reports from nodes ───────────────────────────────────────────────────────
 static void parseNodeReport(char* line, uint32_t now) {
-    // N,<mac>,<seq>,<presence>,<motion>,<rssi>,<rate>,<mode>
+    // N,<mac>,<seq>,<presence>,<motion>,<rssi>,<rate>,<mode>[,<detector>,<fw>]
     if (strncmp(line, "N,", 2) != 0) return;
-    char* f[8];
+    char* f[10];
     int nf = 0;
     char* save = nullptr;
-    for (char* t = strtok_r(line, ",", &save); t && nf < 8; t = strtok_r(nullptr, ",", &save)) f[nf++] = t;
+    for (char* t = strtok_r(line, ",", &save); t && nf < 10; t = strtok_r(nullptr, ",", &save)) f[nf++] = t;
     if (nf < 8) return;
     int i = findNodeHex(f[1]);
     if (i < 0) return;                    // not paired with this Cardputer
@@ -146,6 +152,9 @@ static void parseNodeReport(char* line, uint32_t now) {
     L.rate     = (uint16_t)atoi(f[6]);
     strncpy(L.mode, f[7], sizeof(L.mode) - 1);
     L.mode[sizeof(L.mode) - 1] = '\0';
+    L.detector = nf >= 9 ? (uint8_t)atoi(f[8]) : 1;
+    if (nf >= 10) { strncpy(L.fw, f[9], sizeof(L.fw) - 1); L.fw[sizeof(L.fw) - 1] = '\0'; }
+    else L.fw[0] = '\0';
     if (L.presence) L.lastMotionMs = now;
 }
 
@@ -158,6 +167,7 @@ struct ZoneView {
     const char* name;
     bool        online;
     bool        present;
+    bool        held;        // present only because of the display hold (no live motion)
     float       motion;
     int8_t      rssi;
     uint16_t    rate;
@@ -172,7 +182,11 @@ static ZoneView getZone(int z, uint32_t now) {
     const int i = z;
     v.name = gNodes[i].name;
     v.online = nodeOnline(i, now);
-    v.present = v.online && gLive[i].presence;
+    // v2 nodes: display hold of kDisplayHoldMs after the last reported motion
+    const bool held = gLive[i].detector >= 2 && gLive[i].lastMotionMs &&
+                      now - gLive[i].lastMotionMs < kDisplayHoldMs;
+    v.present = v.online && (gLive[i].presence || held);
+    v.held    = v.present && !gLive[i].presence;
     v.motion = v.online ? gLive[i].motion : 0.0f;
     v.rssi = gLive[i].rssi;
     v.rate = gLive[i].rate;
@@ -204,21 +218,14 @@ static int onlineNodeCount(uint32_t now) {
     return n;
 }
 
-// True while any online node reports calibration mode.
-static bool anyNodeCalibrating(uint32_t now) {
-    for (int i = 0; i < gNodeCount; i++)
-        if (nodeOnline(i, now) && strcmp(gLive[i].mode, "CAL") == 0) return true;
-    return false;
-}
-
 // Status pill for the title bars: "2/3 ON". level 0 = all online (green),
-// 1 = some offline or calibrating (orange), 2 = none online / no Wi-Fi / no nodes (red).
+// 1 = some offline (orange), 2 = none online / no Wi-Fi / no nodes (red).
 static const char* nodesTag(uint32_t now, char* buf, size_t n, int& level) {
     if (!wifiReady)      { level = 2; return "NO WIFI"; }
     if (gNodeCount == 0) { level = 2; return "NO NODES"; }
     const int on = onlineNodeCount(now);
     snprintf(buf, n, "%d/%d ON", on, gNodeCount);
-    level = on == 0 ? 2 : ((on < gNodeCount || anyNodeCalibrating(now)) ? 1 : 0);
+    level = on == 0 ? 2 : (on < gNodeCount ? 1 : 0);
     return buf;
 }
 
@@ -230,7 +237,7 @@ static void serviceNodes() {
     const bool up = wifiReady && WiFi.status() == WL_CONNECTED;
     if (up && !gNodeUdpOn) {
         gNodeUdpOn = gNodeUdp.begin(nodeproto::kReportPort);
-        if (gNodeUdpOn) sendNodeThreshold();
+        if (gNodeUdpOn) sendNodeSens();
     } else if (!up && gNodeUdpOn) {
         gNodeUdp.stop();
         gNodeUdpOn = false;
@@ -246,8 +253,8 @@ static void serviceNodes() {
             while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
             parseNodeReport(buf, now);
         }
-        static uint32_t lastThr = 0;
-        if (now - lastThr >= 5000) { lastThr = now; sendNodeThreshold(); }   // nodes that rebooted
+        static uint32_t lastSens = 0;
+        if (now - lastSens >= 5000) { lastSens = now; sendNodeSens(); }   // nodes that rebooted
     }
     static uint32_t lastHist = 0;
     if (now - lastHist >= 66) {

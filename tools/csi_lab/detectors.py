@@ -168,7 +168,9 @@ class V2Detector:
       mvs    = variance of spread; compared with a quiet floor the node learns by
                itself (falls fast, rises slowly), as log(mvs / floor).
       p      = logistic(w_s * smooth + w_m * log(mvs/floor) + b)
-    Decision: contact after 4 evaluations in a row with p >= 0.5, clear after 3 below.
+    Decision: contact after 10 evaluations in a row with p >= 0.5 (2.5 s), clear after
+    3 below. (4 in a row gave ~11 false alarms/hour in empty rooms on day 2; 10 gave
+    none in 43 min of empty data, walking still covered ~99% with the 10 s display hold.)
     Optional gate: an evaluation only counts as motion if mvs >= gate x floor.
     The floor only rises while p < 0.5, so long motion doesn't teach it "busy".
     """
@@ -179,7 +181,7 @@ class V2Detector:
     SLOT_US = 10000         # at most one packet per 10 ms of radio clock (phase 2)
     HAMPEL_N = 7
     HAMPEL_K = 3.0
-    ON_N = 4
+    ON_N = 10
     OFF_N = 3
     FLOOR_DOWN = 0.2        # per tick, in log domain
     FLOOR_UP = 0.0025       # per tick: ~100 s time constant

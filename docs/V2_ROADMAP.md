@@ -1,7 +1,7 @@
 # Version 2 roadmap
 
 Branch: `version2` (from `main` @ `1257b06`, which already contains the `nodes` work).
-Status: goal 1 done; goal 2 phases 0-3 done (3 in Python); next: recordings at 100 pings/s, refit, phase 4.
+Status: goal 1 done; goal 2 phases 0-3 done (3 in Python, tuned on 2 days); next: phase 4 (v2 on the nodes).
 
 ## Goal 1: Cardputer becomes a console only (done)
 
@@ -103,6 +103,31 @@ Results (first 15 s of each file not scored):
 | Still: contact | 100% | 0-4.5% | 0-1.5% |
 
 With the Cardputer's 10 s display hold added: walking 100%, empty 4.5%.
+
+### Second data set (Nov 12, 2026) and decision tuning
+
+Data: 15 recordings, same 3 nodes, recorded 9h10-18h51 (2 x empty per room at
+different times, 2 x walk, 1 x still). Still made with firmware 2.0-dev2 at
+50 pings/s (the phase 2 firmware was not flashed yet). No "next room" recording yet.
+
+- **v2 as fitted on day 1, on day 2 (unseen day):** empty 0.9% false contact,
+  walking 90.3% raw, but 99.1% with the 10 s display hold. Missed stretches while
+  walking are short (almost all <= 5 s), except one 26 s gap (SALON walk 14h38).
+- **False alarms were the real problem:** with contact after 4 checks (1 s), empty
+  rooms had ~11 alarms per hour. Requiring 10 checks in a row (2.5 s):
+
+  | Contact after | Empty-room alarms (43 min, both days) | Walking covered, raw / with 10 s hold | Still, with hold | First contact (median) |
+  |---|---|---|---|---|
+  | 4 checks (1 s) | 8 (11/h) | 93.3% / 99.4% | 16.3% | 2.5 s |
+  | **10 checks (2.5 s)** | **0** | 86.6% / **98.9%** | 6.8% | 4.2 s |
+
+  Chosen: 10 checks. Smoothness cut-off kept at 0.42 (a refit on both days gave
+  0.35, better raw walking but more alarms; with the display hold walking coverage
+  is the same from 0.30 to 0.45). The energy gate still adds little.
+- **SOUS-SOL "still" at 18h40** keeps 8 short contacts (1.5-7 s): possibly real
+  fidgeting or someone else nearby; other rooms' still recordings are clean.
+- Caveat: 0 alarms in 43 min still allows up to ~4/h (95% bound). Next: a long
+  empty recording (e.g. 60 min, house empty or night) and the "next room" test.
 
 Not used yet: the spread-variance term (fitted weight ~0 on this data) and an
 energy gate (motion only if spread variance >= 2x the quiet floor). The gate

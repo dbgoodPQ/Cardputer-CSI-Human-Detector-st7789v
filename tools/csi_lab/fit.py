@@ -4,7 +4,7 @@
 
 The room is taken from each recording's metadata (record.py --room). For each
 room, the weights are fitted on the OTHER rooms only, then the full v2 detector
-(4-on / 3-off decision) is replayed on that room: leave-one-room-out. That is
+(full decision rule) is replayed on that room: leave-one-room-out. That is
 the honest estimate for a new room without any calibration. Last, it fits on all
 rooms and prints the weights to put in detectors.py (V2_WEIGHTS).
 
@@ -104,7 +104,7 @@ def main() -> int:
         return np.vstack(X), np.concatenate(y)
 
     if len(rooms) >= 2:
-        print("\nLeave-one-room-out (weights fitted without the room, then 4-on/3-off replay on it):")
+        print("\nLeave-one-room-out (weights fitted without the room, then a replay of the room with the full decision rule):")
         print(f"  {'room':10} {'weights (smooth, ratio, bias)':32} {'empty false':>12} {'alarms':>7} "
               f"{'walk det.':>10} {'still':>7}")
         for room in rooms:

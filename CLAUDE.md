@@ -129,12 +129,13 @@ boards, one per room.
    own reimplementation of ESPectre-style ideas, never copy its GPL code/weights).
    Phases 0, 1, 3 done: v2 detector in Python (`tools/csi_lab/detectors.py`
    V2Detector: 12-subcarrier spread std/mean, causal Hampel, every 250 ms over 1 s
-   lag-1 autocorrelation "smoothness" > 0.42, 4-on/3-off, no calibration).
-   Leave-one-room-out on 9 user recordings: walk 99.2-99.6%, empty false
-   0-0.5%; v1 AUTO was 100% false. Findings in docs/V2_ROADMAP.md.
-   Phase 2 firmware done (2.0-dev3: 100/s ping, 10 ms slots, v1 window 50).
-   Next: user records a new set at 100/s (per room 2x empty, 2x walk, 1x still,
-   1x other "next room"), redo fit.py, then phase 4: port v2 to the node.
+   lag-1 autocorrelation "smoothness" > 0.42, contact after 10 checks (2.5 s),
+   clear after 3, no calibration). Day 1 (9 recordings) + day 2 (15, still
+   50 pings/s, fw 2.0-dev2): 0 empty-room alarms in 43 min, walking 98.9% with
+   the Cardputer's 10 s hold; v1 AUTO 27-100% false. Findings in docs/V2_ROADMAP.md.
+   Phase 2 firmware done (2.0-dev3: 100/s ping, 10 ms slots, v1 window 50) but
+   not released/flashed yet (user creates the tag). Next: phase 4 plan (port v2
+   to the node), then recordings at 100/s incl. a long empty one and "next room".
 2. **Per-node calibration** from the node menu; persist calibration on the node.
 3. **Presence event log** on the bottom screen with optional SD persistence.
 4. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)

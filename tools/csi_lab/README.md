@@ -91,7 +91,7 @@ python replay.py "recordings\*.csil" --detector v2 --gate 2     # optional energ
 
 v2 needs no calibration: it decides from how *smoothly* the signal changes over
 the last second (walking = smooth changes, empty room = random noise), checked
-every 250 ms; contact after 4 checks in a row, clear after 3.
+every 250 ms; contact after 10 checks in a row (2.5 s), clear after 3.
 
 ## Fit (v2)
 

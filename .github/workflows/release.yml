@@ -24,10 +24,19 @@ jobs:
       - name: Build firmware
         run: pio run -e cardputer-radar-csi
 
+      - name: Firmware version (include/fw_version.h)
+        run: |
+          V=$(sed -n 's/.*FW_VERSION "\(.*\)".*/\1/p' include/fw_version.h)
+          test -n "$V"
+          echo "FW_VERSION=$V" >> "$GITHUB_ENV"
+          if [ "${{ github.ref_name }}" != "v$V" ]; then
+            echo "::warning::Tag ${{ github.ref_name }} differs from FW_VERSION $V; files are named with $V"
+          fi
+
       - name: Merge binaries
         run: |
           python -m esptool --chip esp32s3 merge_bin \
-            -o cardputer-csi-st7789v-${{ github.ref_name }}.bin \
+            -o cardputer-csi-st7789v-$FW_VERSION.bin \
             --flash_mode qio --flash_size 8MB \
             0x0000 .pio/build/cardputer-radar-csi/bootloader.bin \
             0x8000 .pio/build/cardputer-radar-csi/partitions.bin \
@@ -38,17 +47,44 @@ jobs:
           pio run -d tools/node_esp32 -e esp32-node
           B=tools/node_esp32/.pio/build/esp32-node
           python -m esptool --chip esp32 merge_bin \
-            -o csi-node-esp32-${{ github.ref_name }}.bin \
+            -o csi-node-esp32-$FW_VERSION.bin \
             --flash_mode dio --flash_size 4MB \
             0x1000 $B/bootloader.bin \
             0x8000 $B/partitions.bin \
             0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
             0x10000 $B/firmware.bin
 
+      - name: App-only images and fixed-name copies
+        run: |
+          cp .pio/build/cardputer-radar-csi/firmware.bin          cardputer-csi-st7789v-$FW_VERSION-app.bin
+          cp tools/node_esp32/.pio/build/esp32-node/firmware.bin  csi-node-esp32-$FW_VERSION-app.bin
+          # fixed names for releases/latest/download/... links
+          cp cardputer-csi-st7789v-$FW_VERSION.bin     cardputer-csi-st7789v.bin
+          cp csi-node-esp32-$FW_VERSION.bin            csi-node-esp32.bin
+          cp cardputer-csi-st7789v-$FW_VERSION-app.bin cardputer-csi-st7789v-app.bin
+          cp csi-node-esp32-$FW_VERSION-app.bin        csi-node-esp32-app.bin
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            cardputer-csi-st7789v-${{ github.ref_name }}.bin
-            csi-node-esp32-${{ github.ref_name }}.bin
+            cardputer-csi-st7789v-${{ env.FW_VERSION }}.bin
+            cardputer-csi-st7789v-${{ env.FW_VERSION }}-app.bin
+            csi-node-esp32-${{ env.FW_VERSION }}.bin
+            csi-node-esp32-${{ env.FW_VERSION }}-app.bin
+            cardputer-csi-st7789v.bin
+            csi-node-esp32.bin
+            cardputer-csi-st7789v-app.bin
+            csi-node-esp32-app.bin
+          body: |
+            **Firmware ${{ env.FW_VERSION }}**
+
+            **Which file to flash**
+            - Update (keeps saved Wi-Fi, settings and pairing): `*-${{ env.FW_VERSION }}-app.bin` at **0x10000**.
+            - New board or full reset (erases saved Wi-Fi; nodes must be paired again): `*-${{ env.FW_VERSION }}.bin` at **0x0**.
+            - Cardputer ADV: `cardputer-csi-st7789v-*`. Sensor nodes (ESP32-WROOM-32/32D): `csi-node-esp32-*`.
+            - Files without a version are the same images, for fixed `releases/latest/download/...` links.
+
+            Check after flashing: node serial monitor prints `# CSI node fw ${{ env.FW_VERSION }}`;
+            the Cardputer shows its version in the settings menu (`` ` ``) and each node's in NODES > node.
           generate_release_notes: true

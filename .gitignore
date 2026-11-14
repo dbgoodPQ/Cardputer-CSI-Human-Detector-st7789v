@@ -5,3 +5,7 @@
 .vscode/ipch
 .claude/settings.local.json
 credentials.ini
+
+# csi_lab: recordings stay on your PC (large, and they describe your home)
+tools/csi_lab/recordings/
+__pycache__/

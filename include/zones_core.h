@@ -1,7 +1,7 @@
-// Zones core — included ONCE from src/main.cpp (RADAR_CSI build only), after the
-// CSI pipeline. Holds the paired sensor nodes, their live reports (UDP), the
-// commands sent to them, ESP-NOW pairing plumbing and the zone helpers the
-// screens use. Zone 0 is always "ME" (the Cardputer's own CSI sensing).
+// Zones core — included ONCE from src/main.cpp, after the Wi-Fi code.
+// Holds the paired sensor nodes, their live reports (UDP), the commands sent to
+// them, ESP-NOW pairing plumbing and the zone helpers the screens use.
+// v2: the Cardputer does no sensing itself, so zone i == node i (no "ME" zone).
 #ifndef ZONES_CORE_H
 #define ZONES_CORE_H
 
@@ -25,17 +25,22 @@ struct NodeLive {                // runtime only
     int8_t   rssi;
     uint16_t rate;
     char     mode[8];
+    uint8_t  detector;           // 1 = v1 node (hold built in), 2 = v2 (raw motion)
+    char     fw[16];             // node firmware version ("" = older than 2.1)
 };
+
+// v2 nodes report raw motion; the Cardputer keeps a zone in contact this long
+// after its last motion (v1 nodes did this themselves).
+static const uint32_t kDisplayHoldMs = 10000;
 
 static NodeCfg  gNodes[kMaxNodes];
 static NodeLive gLive[kMaxNodes];
 static int      gNodeCount = 0;
-static uint32_t gMeLastMotionMs = 0;
 
 static WiFiUDP  gNodeUdp;
 static bool     gNodeUdpOn = false;
 
-// strongest zone over time (bottom-screen graph when nodes exist), 15 Hz
+// strongest zone over time (bottom-screen graph), 15 Hz
 static const int kZoneHist = 240;
 static float    gZoneHist[kZoneHist];
 static int      gZoneHistHead = 0;
@@ -118,7 +123,7 @@ static void sendNodeCmd(const char* fmt, ...) {
     }
 }
 
-static void sendNodeThreshold() { sendNodeCmd("C,THR,%.2f", gThreshold); }
+static void sendNodeSens() { sendNodeCmd("C,SENS,%.2f", gSens); }   // v2 smoothness cut-off
 
 static void sendNodeCmdMac(const char* cmd, int idx) {
     if (idx < 0 || idx >= gNodeCount) return;
@@ -129,12 +134,12 @@ static void sendNodeCmdMac(const char* cmd, int idx) {
 
 // ── reports from nodes ───────────────────────────────────────────────────────
 static void parseNodeReport(char* line, uint32_t now) {
-    // N,<mac>,<seq>,<presence>,<motion>,<rssi>,<rate>,<mode>
+    // N,<mac>,<seq>,<presence>,<motion>,<rssi>,<rate>,<mode>[,<detector>,<fw>]
     if (strncmp(line, "N,", 2) != 0) return;
-    char* f[8];
+    char* f[10];
     int nf = 0;
     char* save = nullptr;
-    for (char* t = strtok_r(line, ",", &save); t && nf < 8; t = strtok_r(nullptr, ",", &save)) f[nf++] = t;
+    for (char* t = strtok_r(line, ",", &save); t && nf < 10; t = strtok_r(nullptr, ",", &save)) f[nf++] = t;
     if (nf < 8) return;
     int i = findNodeHex(f[1]);
     if (i < 0) return;                    // not paired with this Cardputer
@@ -147,6 +152,9 @@ static void parseNodeReport(char* line, uint32_t now) {
     L.rate     = (uint16_t)atoi(f[6]);
     strncpy(L.mode, f[7], sizeof(L.mode) - 1);
     L.mode[sizeof(L.mode) - 1] = '\0';
+    L.detector = nf >= 9 ? (uint8_t)atoi(f[8]) : 1;
+    if (nf >= 10) { strncpy(L.fw, f[9], sizeof(L.fw) - 1); L.fw[sizeof(L.fw) - 1] = '\0'; }
+    else L.fw[0] = '\0';
     if (L.presence) L.lastMotionMs = now;
 }
 
@@ -154,11 +162,12 @@ static bool nodeOnline(int i, uint32_t now) {
     return i >= 0 && i < gNodeCount && gLive[i].lastMs && (now - gLive[i].lastMs) < kNodeOfflineMs;
 }
 
-// ── zones (0 = ME, 1.. = nodes) ──────────────────────────────────────────────
+// ── zones (one per node) ──────────────────────────────────────────────
 struct ZoneView {
     const char* name;
     bool        online;
     bool        present;
+    bool        held;        // present only because of the display hold (no live motion)
     float       motion;
     int8_t      rssi;
     uint16_t    rate;
@@ -166,26 +175,18 @@ struct ZoneView {
     const char* mode;
 };
 
-static int zoneCount() { return 1 + gNodeCount; }
+static int zoneCount() { return gNodeCount; }
 
 static ZoneView getZone(int z, uint32_t now) {
     ZoneView v{};
-    if (z == 0) {
-        const auto& s = radar.state();
-        v.name = "ME";
-        v.online = !radar.stale(750);
-        v.present = v.online && s.presence;
-        v.motion = v.online ? s.motion : 0.0f;
-        v.rssi = s.rssi;
-        v.rate = gPktRate;
-        v.lastMotionMs = gMeLastMotionMs;
-        v.mode = s.mode;
-        return v;
-    }
-    int i = z - 1;
+    const int i = z;
     v.name = gNodes[i].name;
     v.online = nodeOnline(i, now);
-    v.present = v.online && gLive[i].presence;
+    // v2 nodes: display hold of kDisplayHoldMs after the last reported motion
+    const bool held = gLive[i].detector >= 2 && gLive[i].lastMotionMs &&
+                      now - gLive[i].lastMotionMs < kDisplayHoldMs;
+    v.present = v.online && (gLive[i].presence || held);
+    v.held    = v.present && !gLive[i].presence;
     v.motion = v.online ? gLive[i].motion : 0.0f;
     v.rssi = gLive[i].rssi;
     v.rate = gLive[i].rate;
@@ -211,6 +212,23 @@ static int activeZone(uint32_t now, float* maxMotion = nullptr, int* maxZone = n
 
 static bool anyZonePresent(uint32_t now) { return activeZone(now) >= 0; }
 
+static int onlineNodeCount(uint32_t now) {
+    int n = 0;
+    for (int i = 0; i < gNodeCount; i++) if (nodeOnline(i, now)) n++;
+    return n;
+}
+
+// Status pill for the title bars: "2/3 ON". level 0 = all online (green),
+// 1 = some offline (orange), 2 = none online / no Wi-Fi / no nodes (red).
+static const char* nodesTag(uint32_t now, char* buf, size_t n, int& level) {
+    if (!wifiReady)      { level = 2; return "NO WIFI"; }
+    if (gNodeCount == 0) { level = 2; return "NO NODES"; }
+    const int on = onlineNodeCount(now);
+    snprintf(buf, n, "%d/%d ON", on, gNodeCount);
+    level = on == 0 ? 2 : (on < gNodeCount ? 1 : 0);
+    return buf;
+}
+
 static float zoneHistAt(int idx) { return gZoneHist[(gZoneHistHead + idx) % kZoneHist]; }
 
 // Called every loop (and from the nodes screens).
@@ -219,7 +237,7 @@ static void serviceNodes() {
     const bool up = wifiReady && WiFi.status() == WL_CONNECTED;
     if (up && !gNodeUdpOn) {
         gNodeUdpOn = gNodeUdp.begin(nodeproto::kReportPort);
-        if (gNodeUdpOn) sendNodeThreshold();
+        if (gNodeUdpOn) sendNodeSens();
     } else if (!up && gNodeUdpOn) {
         gNodeUdp.stop();
         gNodeUdpOn = false;
@@ -235,11 +253,9 @@ static void serviceNodes() {
             while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
             parseNodeReport(buf, now);
         }
-        static uint32_t lastThr = 0;
-        if (now - lastThr >= 5000) { lastThr = now; sendNodeThreshold(); }   // nodes that rebooted
+        static uint32_t lastSens = 0;
+        if (now - lastSens >= 5000) { lastSens = now; sendNodeSens(); }   // nodes that rebooted
     }
-    if (!radar.stale(750) && radar.state().presence) gMeLastMotionMs = now;
-
     static uint32_t lastHist = 0;
     if (now - lastHist >= 66) {
         lastHist = now;
@@ -248,16 +264,6 @@ static void serviceNodes() {
         gZoneHist[gZoneHistHead] = m;
         gZoneHistHead = (gZoneHistHead + 1) % kZoneHist;
     }
-}
-
-// ── pause / resume the Cardputer's own sensing (ESP-NOW pairing) ─────────────
-static void pauseCsi() {
-    stopPing();
-    esp_wifi_set_csi(false);
-    esp_wifi_set_promiscuous(false);
-}
-static void resumeCsi() {
-    if (wifiReady && WiFi.status() == WL_CONNECTED) enableCsi();
 }
 
 // ── ESP-NOW pairing plumbing ─────────────────────────────────────────────────
@@ -301,7 +307,6 @@ static void pairAddPeer(const uint8_t mac[6]) {
 }
 
 static bool pairStart() {
-    pauseCsi();
     gPairEvtR = gPairEvtW = 0;
     gEspNowOn = esp_now_init() == ESP_OK;
     if (gEspNowOn) esp_now_register_recv_cb(pairRecv);
@@ -310,7 +315,7 @@ static bool pairStart() {
 
 static void pairStop() {
     if (gEspNowOn) { esp_now_unregister_recv_cb(); esp_now_deinit(); gEspNowOn = false; }
-    resumeCsi();
+    esp_wifi_set_ps(WIFI_PS_NONE);   // console default (see onWifiUp)
 }
 
 static void pairSendSeen(const uint8_t mac[6]) {
@@ -336,22 +341,22 @@ static bool pairSendCreds(const uint8_t mac[6]) {
     return esp_now_send(mac, (const uint8_t*)&msg, sizeof(msg)) == ESP_OK;
 }
 
-// ── which zone the range cone shows (key n): 0 = ME, 1..n = node, n+1 = AUTO ──
-static int gConeSel  = 0;
-static int gAutoZone = 0;      // zone AUTO currently follows (sticky, avoids flicker)
+// ── which zone the range cone shows (key n): 0..n-1 = node, >= n = AUTO ──────
+static int gConeSel  = kMaxNodes;  // start in AUTO
+static int gAutoZone = 0;          // zone AUTO currently follows (sticky, avoids flicker)
 
-static bool coneAuto() { return gNodeCount > 0 && gConeSel > gNodeCount; }
+static bool coneAuto() { return gNodeCount > 0 && gConeSel >= gNodeCount; }
 
 static void coneNext() {
-    if (gNodeCount == 0) { gConeSel = 0; return; }
-    gConeSel = (gConeSel > gNodeCount) ? 0 : gConeSel + 1;   // ME, nodes..., AUTO, ME
+    if (gNodeCount == 0) return;
+    gConeSel = coneAuto() ? 0 : gConeSel + 1;   // nodes..., AUTO, first node
 }
 
 // Zone to draw now. AUTO follows the strongest zone with motion and keeps it
 // until another one is clearly stronger (+10%) or it goes clear; when every
 // zone is clear it stays on the last one shown.
 static int coneZoneNow(uint32_t now) {
-    if (gNodeCount == 0) { gConeSel = 0; return 0; }
+    if (gNodeCount == 0) return -1;
     if (!coneAuto()) return gConeSel;
     if (gAutoZone >= zoneCount()) gAutoZone = 0;
     ZoneView cur = getZone(gAutoZone, now);
@@ -366,6 +371,7 @@ static int coneZoneNow(uint32_t now) {
 // ── bottom screen: one chip per zone (magenta = motion, outline = clear, grey = offline)
 static void drawZoneChips(int y, uint32_t now) {
     const int n = zoneCount();
+    if (n == 0) return;
     const int W = canvas.width();
     const int gap = 2;
     const int cw = (W - 8 - (n - 1) * gap) / n;

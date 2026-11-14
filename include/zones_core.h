@@ -21,12 +21,17 @@ struct NodeLive {                // runtime only
     uint32_t lastMs;
     uint32_t lastMotionMs;
     float    motion;
+    float    lastPresMotion;     // motion level of the last report with presence
     bool     presence;
     int8_t   rssi;
     uint16_t rate;
     char     mode[8];
     uint8_t  detector;           // 1 = v1 node (hold built in), 2 = v2 (raw motion)
     char     fw[16];             // node firmware version ("" = older than 2.1)
+    bool     hasDiag;            // fw 2.5+: the three fields below are valid
+    uint32_t upS;                // node uptime, seconds
+    uint16_t drops;              // Wi-Fi drops + forced reconnects since its boot
+    char     boot[6];            // why it last booted: PWR EXT SW NET WDT PANIC BOD ?
 };
 
 // v2 nodes report raw motion; the Cardputer keeps a zone in contact this long
@@ -134,12 +139,12 @@ static void sendNodeCmdMac(const char* cmd, int idx) {
 
 // ── reports from nodes ───────────────────────────────────────────────────────
 static void parseNodeReport(char* line, uint32_t now) {
-    // N,<mac>,<seq>,<presence>,<motion>,<rssi>,<rate>,<mode>[,<detector>,<fw>]
+    // N,<mac>,<seq>,<presence>,<motion>,<rssi>,<rate>,<mode>[,<detector>,<fw>[,<uptime s>,<drops>,<boot>]]
     if (strncmp(line, "N,", 2) != 0) return;
-    char* f[10];
+    char* f[13];
     int nf = 0;
     char* save = nullptr;
-    for (char* t = strtok_r(line, ",", &save); t && nf < 10; t = strtok_r(nullptr, ",", &save)) f[nf++] = t;
+    for (char* t = strtok_r(line, ",", &save); t && nf < 13; t = strtok_r(nullptr, ",", &save)) f[nf++] = t;
     if (nf < 8) return;
     int i = findNodeHex(f[1]);
     if (i < 0) return;                    // not paired with this Cardputer
@@ -155,7 +160,15 @@ static void parseNodeReport(char* line, uint32_t now) {
     L.detector = nf >= 9 ? (uint8_t)atoi(f[8]) : 1;
     if (nf >= 10) { strncpy(L.fw, f[9], sizeof(L.fw) - 1); L.fw[sizeof(L.fw) - 1] = '\0'; }
     else L.fw[0] = '\0';
-    if (L.presence) L.lastMotionMs = now;
+    L.hasDiag = nf >= 13;
+    if (L.hasDiag) {
+        L.upS   = (uint32_t)strtoul(f[10], nullptr, 10);
+        L.drops = (uint16_t)atoi(f[11]);
+        strncpy(L.boot, f[12], sizeof(L.boot) - 1); L.boot[sizeof(L.boot) - 1] = '\0';
+        char* e = L.boot + strlen(L.boot);
+        while (e > L.boot && (e[-1] == '\n' || e[-1] == '\r')) *--e = '\0';
+    }
+    if (L.presence) { L.lastMotionMs = now; L.lastPresMotion = L.motion; }
 }
 
 static bool nodeOnline(int i, uint32_t now) {
@@ -173,6 +186,7 @@ struct ZoneView {
     uint16_t    rate;
     uint32_t    lastMotionMs;
     const char* mode;
+    float       heldMotion;  // last live motion level while in contact (for the display hold)
 };
 
 static int zoneCount() { return gNodeCount; }
@@ -192,6 +206,7 @@ static ZoneView getZone(int z, uint32_t now) {
     v.rate = gLive[i].rate;
     v.lastMotionMs = gLive[i].lastMotionMs;
     v.mode = gLive[i].lastMs ? gLive[i].mode : "WAIT";
+    v.heldMotion = gLive[i].lastPresMotion;
     return v;
 }
 
@@ -246,7 +261,7 @@ static void serviceNodes() {
         for (int k = 0; k < 12; k++) {
             int sz = gNodeUdp.parsePacket();
             if (sz <= 0) break;
-            char buf[96];
+            char buf[128];
             int n = gNodeUdp.read(buf, sizeof(buf) - 1);
             if (n <= 0) continue;
             buf[n] = '\0';

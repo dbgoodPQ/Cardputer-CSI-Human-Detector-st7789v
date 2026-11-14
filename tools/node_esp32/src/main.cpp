@@ -14,6 +14,13 @@
 //
 // Reset: hold the BOOT button 5 s (after power-up) -> Wi-Fi forgotten, setup mode.
 // A freshly paired node that can't join the Wi-Fi within 60 s goes back to setup mode.
+//
+// Staying online (fw 2.5): the Arduino core's auto-reconnect gives up for good
+// after some disconnect reasons (e.g. a 4-way handshake timeout), which left
+// nodes powered but offline until unplugged. The node now reconnects itself
+// (10 s, 20 s, 40 s, then every 60 s), forces a reconnect when the link is "up"
+// but nothing comes back from the router for 30 s, restarts after 5 min without
+// a working link, and a task watchdog reboots it if the run loop ever freezes.
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -21,6 +28,8 @@
 #include <Preferences.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
+#include <esp_task_wdt.h>
+#include <esp_system.h>
 #include "ping/ping_sock.h"
 #include "lwip/ip_addr.h"
 #include "freertos/queue.h"
@@ -42,6 +51,30 @@ static char    gMyHex[13];
 // slightly newer than the loop's `now`; plain unsigned `now - t` then wraps to a
 // huge value and fires timeouts at once.
 static inline int32_t msSince(uint32_t now, uint32_t t) { return (int32_t)(now - t); }
+
+// ── why the node last booted (sent to the Cardputer, NODES > node) ───────────
+// Survives a software restart (not a power cycle): set just before the node
+// restarts itself because the link stayed dead.
+static const uint32_t kNetRestartMagic = 0x4E455452;   // "NETR"
+RTC_NOINIT_ATTR static uint32_t gRestartWhy;
+static const char* gBootWhy = "?";
+
+static const char* bootReason() {
+    const esp_reset_reason_t r = esp_reset_reason();
+    const bool net = gRestartWhy == kNetRestartMagic;
+    gRestartWhy = 0;
+    switch (r) {
+        case ESP_RST_POWERON:  return "PWR";
+        case ESP_RST_EXT:      return "EXT";
+        case ESP_RST_SW:       return net ? "NET" : "SW";
+        case ESP_RST_PANIC:    return "PANIC";
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:      return "WDT";
+        case ESP_RST_BROWNOUT: return "BOD";
+        default:               return "?";
+    }
+}
 
 // ── LED + BOOT button ─────────────────────────────────────────────────────────
 static void ledSet(bool on) { digitalWrite(NODE_LED_PIN, on ? HIGH : LOW); }
@@ -195,6 +228,11 @@ static uint32_t gBlinkUntil = 0;
 static bool     gPresent   = false;
 static float    gMotion    = 0.0f;   // v2 probability, shown as motion level
 
+// Link health: the last time something came back from the router.
+static volatile uint32_t gLastPingOkMs = 0;   // ping reply (set from the ping task)
+static uint32_t          gLastCsiMs    = 0;   // router CSI packet processed
+static uint16_t          gDrops        = 0;   // Wi-Fi drops + forced reconnects since boot
+
 static void csiCallback(void*, wifi_csi_info_t* info) {
     if (!info || !info->buf || info->len < 128 || !gBssidOk || !gCsiQ) return;
     if (memcmp(info->mac, gBssid, 6) != 0) return;
@@ -335,6 +373,7 @@ static void startPing() {
     cfg.task_prio       = 2;
     esp_ping_callbacks_t cbs;
     memset(&cbs, 0, sizeof(cbs));
+    cbs.on_ping_success = [](esp_ping_handle_t, void*) { gLastPingOkMs = millis(); };
     if (esp_ping_new_session(&cfg, &cbs, &gPing) == ESP_OK) esp_ping_start(gPing);
     else gPing = nullptr;
     Serial.printf("# ping %s %d/s: %s\n", gw.toString().c_str(), gPingHz, gPing ? "on" : "FAILED");
@@ -352,6 +391,7 @@ static void startSensing() {
     gV2.reset(); gV2.cut = cut;
     gGate.reset(millis());
     gPresent = false; gMotion = 0.0f; gRssiEma = (float)WiFi.RSSI();
+    gLastCsiMs = millis(); gLastPingOkMs = gLastCsiMs;   // grace period for the link check
     esp_wifi_set_ps(WIFI_PS_NONE);
     // No promiscuous mode: only router frames addressed to this node (its ping
     // replies), not the ones sent to other devices. Same as the Cardputer.
@@ -449,6 +489,7 @@ static void serviceSensing(uint32_t now) {
             float spread;
             const uint8_t st = processCsiPkt(pk, now, &spread);
             logPacket(pk, st, spread, now);
+            gLastCsiMs = now;
         }
     }
     serviceLog(now);
@@ -461,41 +502,114 @@ static void serviceSensing(uint32_t now) {
     }
     if (msSince(now, lastRep) >= 100 && gUdpOn) {
         lastRep = now;
-        // N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<mode>,<detector>,<fw>
-        char line[96];
-        int n = snprintf(line, sizeof(line), "N,%s,%lu,%d,%.3f,%d,%u,%s,2,%s\n", gMyHex, (unsigned long)(++seq),
+        // N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<mode>,<detector>,<fw>,<uptime s>,<drops>,<boot>
+        // (fields 11-13 since fw 2.5; older Cardputers ignore them)
+        char line[128];
+        int n = snprintf(line, sizeof(line), "N,%s,%lu,%d,%.3f,%d,%u,%s,2,%s,%lu,%u,%s\n", gMyHex, (unsigned long)(++seq),
                          gPresent ? 1 : 0, gMotion, (int)gCsiRssi, (unsigned)gPktRate,
-                         gV2.ready ? "RUN" : "NO CSI", kFwVer);
+                         gV2.ready ? "RUN" : "NO CSI", kFwVer,
+                         (unsigned long)(now / 1000), (unsigned)gDrops, gBootWhy);
+        if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
         gUdp.beginPacket(IPAddress(255, 255, 255, 255), nodeproto::kReportPort);
         gUdp.write((const uint8_t*)line, n);
         gUdp.endPacket();
     }
 }
 
+// ── staying online ────────────────────────────────────────────────────────────
+// The core's auto-reconnect is off: it stops for good after some disconnect
+// reasons. The run loop reconnects itself instead (see the header comment).
+static const uint32_t kRetryFirstMs  = 10000;    // first retry after 10 s down, then x2
+static const uint32_t kRetryMaxMs    = 60000;    // ... up to every 60 s
+static const uint32_t kLinkDeadMs    = 30000;    // "connected" but no ping reply / CSI this long
+static const uint32_t kRestartDownMs = 300000;   // no working link for 5 min -> restart
+static const int      kWdtSeconds    = 15;       // run loop frozen this long -> reboot
+
+static const char* gSsid = "";
+static const char* gPass = "";
+static volatile uint8_t gLastDiscReason = 0;
+static uint32_t gNoStartUntil = 0;   // after a forced reconnect: ignore a stale "connected" briefly
+
+static void wifiBegin() {
+    if (gPass[0]) WiFi.begin(gSsid, gPass); else WiFi.begin(gSsid);
+}
+
+static void onWifiEvent(arduino_event_id_t ev, arduino_event_info_t info) {
+    if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) gLastDiscReason = info.wifi_sta_disconnected.reason;
+}
+
+static void reconnectNow(const char* why) {
+    gDrops++;
+    Serial.printf("# Wi-Fi: reconnecting (%s, last reason %u, drops %u)\n", why,
+                  (unsigned)gLastDiscReason, (unsigned)gDrops);
+    if (gSensing) stopSensing();
+    WiFi.disconnect(false, false);
+    delay(100);
+    wifiBegin();
+    gNoStartUntil = millis() + 3000;
+}
+
 static void runRunMode(const char* ssid, const char* pass, bool fresh) {
     Serial.printf("# RUN MODE: node %s joining %s\n", gMyHex, ssid);
+    gSsid = ssid; gPass = pass;
+    WiFi.onEvent(onWifiEvent);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
-    WiFi.setAutoReconnect(true);
-    if (pass[0]) WiFi.begin(ssid, pass); else WiFi.begin(ssid);
+    WiFi.setAutoReconnect(false);
+    wifiBegin();
+    esp_task_wdt_init(kWdtSeconds, true);    // reconfigures the core's task watchdog
+    esp_task_wdt_add(nullptr);               // ...and watches this (the run) loop
     const uint32_t t0 = millis();
-    bool everConnected = false;
+    gNoStartUntil = t0;
+    bool     everConnected = false;
+    uint32_t lastGoodMs   = t0;              // last time the link was known to work
+    uint32_t downSinceMs  = t0;              // when the Wi-Fi went down (or the last retry)
+    uint32_t retryMs      = kRetryFirstMs;
+    bool     wasUp        = false;
     for (;;) {
+        esp_task_wdt_reset();
         const uint32_t now = millis();
         checkBootButton();
         const bool up = WiFi.status() == WL_CONNECTED;
-        if (up && !gSensing) {
+        if (up && !gSensing && msSince(now, gNoStartUntil) >= 0) {
             if (!everConnected && fresh) {
                 Preferences p; p.begin("csinode", false); p.putBool("fresh", false); p.end();
             }
             everConnected = true;
+            Serial.printf("# Wi-Fi up, ip %s\n", WiFi.localIP().toString().c_str());
             startSensing();
         } else if (!up && gSensing) {
-            Serial.println("# Wi-Fi lost");
+            gDrops++;
+            Serial.printf("# Wi-Fi lost (reason %u, drops %u)\n", (unsigned)gLastDiscReason, (unsigned)gDrops);
             stopSensing();
         }
-        if (!everConnected && fresh && now - t0 > 60000) {
+        if (up != wasUp) { wasUp = up; downSinceMs = now; }
+
+        if (up && gSensing) {
+            // Link check: the router answers our pings, and those answers carry the CSI.
+            const uint32_t lastRx = msSince(gLastCsiMs, gLastPingOkMs) > 0 ? gLastCsiMs : gLastPingOkMs;
+            if (msSince(now, lastRx) < (int32_t)kLinkDeadMs) {
+                lastGoodMs = lastRx;
+                retryMs = kRetryFirstMs;
+            } else {
+                reconnectNow("nothing from the router for 30 s");
+                downSinceMs = now;
+                wasUp = false;
+            }
+        } else if (!up && msSince(now, downSinceMs) >= (int32_t)retryMs) {
+            reconnectNow("Wi-Fi down");
+            downSinceMs = now;
+            retryMs = retryMs * 2 > kRetryMaxMs ? kRetryMaxMs : retryMs * 2;
+        }
+        if (everConnected && msSince(now, lastGoodMs) > (int32_t)kRestartDownMs) {
+            Serial.println("# no working link for 5 min, restarting");
+            gRestartWhy = kNetRestartMagic;
+            delay(50);
+            ESP.restart();
+        }
+        if (!everConnected && fresh && msSince(now, t0) > 60000) {
             Serial.println("# could not join the Wi-Fi after pairing");
+            esp_task_wdt_delete(nullptr);
             forgetAndRestart();
         }
         if (gSensing) {
@@ -519,6 +633,9 @@ void setup() {
     WiFi.macAddress(gMyMac);
     nodeproto::macHex(gMyMac, gMyHex);
     Serial.printf("\n# CSI node fw %s  id NODE %02X%02X  mac %s\n", kFwVer, gMyMac[4], gMyMac[5], gMyHex);
+
+    gBootWhy = bootReason();
+    Serial.printf("# boot reason: %s\n", gBootWhy);
 
     Preferences p;
     p.begin("csinode", true);

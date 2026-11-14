@@ -2,7 +2,7 @@ name: Build firmware
 
 on:
   push:
-    branches: [ main, version2 ]
+    branches: [ main, version2, v2.5 ]
   pull_request:
   workflow_dispatch:
 

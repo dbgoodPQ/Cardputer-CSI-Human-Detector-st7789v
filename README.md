@@ -27,6 +27,16 @@ changes, an empty room only noise). Tested on 24 recordings in 3 rooms over 2 da
 in 43 minutes of empty rooms, walking detected about 99% of the time. Details and data:
 [`docs/V2_ROADMAP.md`](docs/V2_ROADMAP.md).
 
+**Firmware 2.5 (branch `v2.5`):**
+- **Nodes stay online.** A node could lose the Wi-Fi and never rejoin until unplugged (the ESP32
+  Arduino core stops reconnecting after some disconnect reasons). Nodes now reconnect on their own
+  (after 10 s, then 20 s, 40 s, then every 60 s), force a reconnect when the router stops answering
+  for 30 s, restart after 5 min without a working link, and a watchdog reboots a frozen node.
+  NODES > node shows the node's uptime, Wi-Fi drops since its boot and why it last booted.
+- **Range cone = motion gauge in %**: five 20% bands, filled from the apex up to the motion level,
+  red up to 30%, yellow 31-70%, green above 70%.
+- Key `r` (5 m / 10 m) is gone, and so is the old `[c] cal all` hint in the ZONES view.
+
 **Which file to flash:** every firmware file carries its version, e.g.
 `csi-node-esp32-2.1.0-dev1-app.bin`. Update with the `-app.bin` files at `0x10000` (keeps Wi-Fi and
 pairing); the files without `-app` go at `0x0` and erase the saved Wi-Fi (nodes must be paired
@@ -71,13 +81,13 @@ with the SD card, 27 MHz), keyboard controls, settings, partitions, build enviro
 > Previews rendered from the screen designs, with example data. On the device the text uses the
 > Cardputer's pixel font, so spacing differs slightly.
 
-> These previews are from v1: in v2 there is no `ME` zone, only the sensor nodes.
-
 **External screen** (ST7789V, 320x240) — `.` switches views:
 
-| Range cone (`n` picks the zone, `r` the scale) | Zones (every sensor node) |
+| Range cone (`n` picks the zone) | Zones (every sensor node) |
 | --- | --- |
-| <img src="docs/screens/cone.png" width="320" alt="Range cone showing motion 42% in the KITCHEN zone"> | <img src="docs/screens/zones.png" width="320" alt="Zones view: ME clear, KITCHEN motion 34%, HALLWAY clear, BEDROOM offline"> |
+| <img src="docs/screens/cone.png" width="320" alt="Range cone gauge filled to 82% (red, yellow, green bands) in the KITCHEN zone"> | <img src="docs/screens/zones.png" width="320" alt="Zones view: KITCHEN motion 82%, HALLWAY clear, BEDROOM offline"> |
+| **Range cone, display hold** (last level, dimmed) | |
+| <img src="docs/screens/cone-hold.png" width="320" alt="Range cone in the display hold: MOTION a few seconds ago, dimmed fill at 64%"> | |
 
 **Cardputer screen** (240x135):
 
@@ -89,7 +99,7 @@ with the SD card, 27 MHz), keyboard controls, settings, partitions, build enviro
 
 | Node list | One node |
 | --- | --- |
-| <img src="docs/screens/nodes.png" width="320" alt="NODES list with three nodes and ADD NODE"> | <img src="docs/screens/node-edit.png" width="320" alt="KITCHEN node: rename, blink LED, remove"> |
+| <img src="docs/screens/nodes.png" width="320" alt="NODES list with three nodes and ADD NODE"> | <img src="docs/screens/node-edit.png" width="320" alt="KITCHEN node: version, uptime, Wi-Fi drops and boot reason; rename, blink LED, remove"> |
 | **Add node: name it** | **Add node: paired** |
 | <img src="docs/screens/add-node.png" width="320" alt="Add node: found NODE A1B2, name KITCHEN"> | <img src="docs/screens/paired.png" width="320" alt="KITCHEN joined the Wi-Fi and is online"> |
 
@@ -131,7 +141,6 @@ The nodes join the same network when you pair them, so pick your home 2.4 GHz Wi
 
 | Key | Action |
 |-----|--------|
-| `r` | Range cone scale: 5 m (1 m lines) / 10 m (2 m lines) |
 | `n` | Range cone zone: AUTO (default, follows the zone with the strongest motion) → each node → AUTO. Shows the cone first if the zones view is open |
 | `.` | External screen view: range cone ↔ zones |
 | `,` | More sensitive: lowers the motion cut-off by 0.02 (default 0.42, range 0.30-0.60), sent to every node |
@@ -144,7 +153,9 @@ The nodes join the same network when you pair them, so pick your home 2.4 GHz Wi
 
 Each sensor node measures how the Wi-Fi signal from your router changes as it travels through its room.
 It detects **motion**, best when someone moves between the node and the router, within a few
-metres. It can't locate people, so the range cone shows *that* there is motion and how strong, not where.
+metres. It can't locate people, so the range cone is a gauge of *how much* motion there is, not where:
+it fills from the bottom (0%) up to the motion level, in 20% bands (red up to 30%, yellow 31-70%,
+green above 70%). During the 10 s display hold the fill stays at the last level, dimmed.
 Someone sitting perfectly still stays on screen for about 10 s after their last movement, then disappears.
 Through-wall sensing is weak.
 
@@ -156,7 +167,10 @@ Through-wall sensing is weak.
 - The status pill shows how many nodes are online, e.g. `3/3 ON` (green), `2/3 ON` (orange: one is
   offline), `NO NODES` / `NO WIFI` (red).
 - Each node's own state shows in the ZONES view and the NODES menu: `NO SIGNAL` (that node gets no
-  router frames), `OFFLINE` (no report for 10 s). NODES > node also shows its firmware version.
+  router frames), `OFFLINE` (no report for 10 s). NODES > node also shows its firmware version and,
+  from fw 2.5, its uptime (`up 3 h`), Wi-Fi drops since its boot and why it last booted (`PWR` power on,
+  `NET` restarted itself after 5 min without a working link, `WDT` watchdog, `BOD` brownout = weak USB
+  power, `PANIC` crash, `SW`/`EXT` restart/reset button). Orange = something to look at.
 - No calibration: a node works as soon as it's online. Contact starts after about 2.5 s of steady
   motion; a room stays marked for 10 s after the last motion (display hold), then clears.
 - If you get false contacts, make it less sensitive with `/`; if you're missed, more sensitive with `,`.
@@ -220,6 +234,10 @@ are accepted from anyone on your local network.
   networks isolate clients). Try another network or enable ping replies on the router.
 - **Node never appears in ADD NODE:** check its LED blinks slowly (setup mode); otherwise hold BOOT
   5 s. Keep it within a few metres of the Cardputer while pairing.
+- **A node goes `OFFLINE` and only comes back after unplugging it:** update it to fw 2.5 or later
+  (it reconnects on its own). If it still drops, open NODES > node: many drops = weak Wi-Fi where it
+  sits; `BOD` = weak USB power supply or cable. The node's serial monitor (115200) logs every drop with
+  its Wi-Fi reason code.
 - **Node paired but stays `WAITING`/`OFFLINE`:** it can't reach the Wi-Fi (2.4 GHz only) or your
   network blocks broadcast between devices (guest networks / client isolation).
 - **Screen stays dark:** check BL on G4; or wire BL to 3V3 and build with `-DEXT_SOFT_DIM=1`.

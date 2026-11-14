@@ -23,9 +23,13 @@ room by room. Realistic target: **presence + motion** per room.
 - **Displays (different content per screen, NOT a clone):**
   - Top = external **Waveshare 2" ST7789V** (320x240 @ rotation `EXT_ROTATION`=1),
     `.` toggles two views:
-    - **Range cone** (`drawTop()`): apex = viewer at the bottom, distance lines
-      every 1 m to 5 m or every 2 m to 10 m (`gRange10`, key r, saved in prefs).
-      CSI has no distance, so motion = whole-cone glow + `MOTION xx%`; no dots.
+    - **Range cone** (`drawTop()`): apex = viewer at the bottom; since fw 2.5 a
+      motion gauge: five 20% bands (labels 20%..100%), filled from the apex up
+      to the motion level, band colour by height (`coneBandCol()`: red <= 30%,
+      yellow 31-70%, green > 70%), alpha 0.62 + bright edge at the level; display
+      hold = fill at `ZoneView.heldMotion` (last motion with presence), alpha 0.28;
+      CLEAR = empty cone. Text has a black shadow. `MOTION xx%`; no dots. (Key r /
+      `gRange10` 5 m/10 m removed in 2.5; old prefs key "range10" is just unused.)
       Key n picks the zone (`gConeSel`: 0..n-1 = node, >= n = AUTO, default AUTO;
       `coneZoneNow()` in zones_core.h returns -1 with no nodes; AUTO sticky +10%
       margin). Zone name top-left, AUTO/MANUAL badge bottom-left. Empty states:
@@ -38,9 +42,9 @@ room by room. Realistic target: **presence + motion** per room.
     `>> ZONE <<` > CLEAR), zone chips, strongest-zone graph (0.5 line = cut-off),
     cut-off + key hints.
 - Keys: `,` `/` sensitivity = v2 smoothness cut-off `gSens` (0.30-0.60, step 0.02,
-  default 0.42, prefs "sens", sent as `C,SENS` on change + every 5 s), `n`, `r`,
+  default 0.42, prefs "sens", sent as `C,SENS` on change + every 5 s), `n`,
   `.`, `` ` `` menu (PALETTE, SCREEN, EXT PANEL, WIFI NET, NODES; version top-right).
-  No `c`/`x`: v2 needs no calibration.
+  No `c`/`x`/`r`: v2 needs no calibration, cone scale is fixed in %.
 - Display hold: v2 nodes report raw contact; `getZone()` keeps a zone present
   for `kDisplayHoldMs` (10 s) after its last reported motion (`ZoneView.held` =
   present only by hold; cone shows "MOTION / a few seconds ago"). v1 nodes
@@ -61,8 +65,9 @@ room by room. Realistic target: **presence + motion** per room.
   smoothness = lag-1 autocorrelation; motion if smoothness >= cut (0.4166; in
   contact: cut - 0.12); contact after 10 checks, clear after 3; NO CSI if < 20
   packets. prob = logistic(20.74 (smooth - cut)) = motion level. No hold, no
-  calibration. Broadcasts `N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<RUN|NO CSI>,2,<fw>`
-  on UDP 4211 at 10 Hz. Cardputer → nodes UDP 4212: `C,SENS,<cut>|BLINK,<mac>|FORGET,<mac>`;
+  calibration. Broadcasts `N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<RUN|NO CSI>,2,<fw>,<uptime s>,<drops>,<boot>`
+  on UDP 4211 at 10 Hz (last 3 fields since fw 2.5; Cardputer `NodeLive.hasDiag`, shown in
+  NODES > node; boot = PWR EXT SW NET WDT PANIC BOD ?). Cardputer → nodes UDP 4212: `C,SENS,<cut>|BLINK,<mac>|FORGET,<mac>`;
   from a PC: `C,LOG,<mac>,<port>`, `C,RATE,<mac>,<hz>`. v1 commands ignored.
   (v1 method up to fw 2.0-dev3: 52-subcarrier shape variance, calibration, 10 s hold.)
 - Raw CSI logging (fw 2.0-dev2+; 2.0-dev had a timeout bug): `C,LOG,<mac>,<port>` from a PC (keep-alive every
@@ -77,6 +82,12 @@ room by room. Realistic target: **presence + motion** per room.
   ESP-NOW plumbing, bottom chips) and `include/zones_ui.h` (ZONES view, NODES
   menu: list / node RENAME-BLINK-REMOVE / add-node flow). Zone i == node i. Names live on the
   Cardputer only (max 6 nodes, 10 chars). Node offline after 10 s silence.
+- Node staying online (fw 2.5, `runRunMode`): `WiFi.setAutoReconnect(false)` (arduino-esp32
+  2.0.17 never retries after some disconnect reasons, e.g. 4-way handshake timeout → user's
+  nodes stayed offline until unplugged); own retry after 10 s down, x2 up to 60 s; link check =
+  newest of ping reply (`on_ping_success`) and router CSI, none for 30 s → forced reconnect;
+  no working link for 5 min → `ESP.restart()` (RTC_NOINIT marker → boot "NET"); task watchdog
+  15 s on the run loop (`esp_task_wdt_init/add/reset`). Disconnect reason logged on serial.
 - Node: BOOT 5 s = forget creds; fresh pairing + no Wi-Fi in 60 s = forget;
   LED (GPIO2) slow blink = setup, on = motion, fast = BLINK.
 - Design mockups: claude.ai Design canvas "Sensor Nodes Screens".
@@ -87,7 +98,7 @@ room by room. Realistic target: **presence + motion** per room.
 - `pio run -e cardputer-radar-csi -t upload` — Cardputer console (name kept from
   v1; only build). CI output `cardputer-csi-st7789v.bin`, flash at 0x0.
 - `cd tools/node_esp32 && pio run -t upload` — sensor node. CI output `csi-node-esp32.bin`.
-- CI (`build.yml`) builds both on pushes to `main` and `version2`, PRs, manual runs.
+- CI (`build.yml`) builds both on pushes to `main`, `version2` and `v2.5`, PRs, manual runs.
 - Releases (`release.yml`, on `v*` tags; the user creates tags, this environment
   can't push them): full images `*.bin` at 0x0 (erase NVS → nodes must re-pair)
   and app-only `*-app.bin` at 0x10000 (keep Wi-Fi/pairing/settings). GitHub tends to
@@ -128,6 +139,9 @@ room by room. Realistic target: **presence + motion** per room.
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
 
 ## Status (v2)
+🧪 fw 2.5.0-dev1 (branch `v2.5`): node reconnect/watchdog fix, node diagnostics, cone in %,
+no `r` key. Not yet tested on hardware. README previews in docs/screens re-rendered for 2.5
+(PIL, DejaVu Sans Mono, from the drawing code; not device photos).
 ✅ Cardputer is console only (this branch). 🧪 fw 2.1.0-dev1 (v2 on nodes,
 display hold, sensitivity keys, versioned binaries) not yet tested on hardware.
 ✅ External Waveshare 2" ST7789V working (pinout confirmed by user).

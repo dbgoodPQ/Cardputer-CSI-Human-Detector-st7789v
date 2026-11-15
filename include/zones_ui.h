@@ -8,11 +8,14 @@
 
 // ── shared helpers ───────────────────────────────────────────────────────────
 static void drawZones();
+static void drawHealth();        // logs_ui.h
+static bool gExtOwned = false;   // the log viewer draws the external screen itself
 
 static void drawExternalView() {
-    if (!extReady) return;
-    if (gViewMode == 0) drawTop();
-    else                drawZones();
+    if (!extReady || gExtOwned) return;
+    if (gViewMode == 0)      drawTop();
+    else if (gViewMode == 1) drawZones();
+    else                     drawHealth();
 }
 
 // Keeps everything running while a blocking menu screen is open.

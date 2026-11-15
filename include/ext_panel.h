@@ -46,7 +46,8 @@ public:
             cfg.spi_mode    = 0;
             cfg.freq_write  = 27000000;
             cfg.freq_read   = 16000000;
-            cfg.spi_3wire   = true;
+            cfg.spi_3wire   = false;         // write-only panel (no MISO); 3-wire mode would
+                                             // leave MOSI half-duplex and break SD card reads
             cfg.use_lock    = true;
             cfg.dma_channel = 0;
             cfg.pin_sclk    = EXT_TFT_SCK;

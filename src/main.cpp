@@ -5,11 +5,13 @@
 // (tools/node_esp32) measure Wi-Fi CSI motion in each room and report it over
 // UDP. The Cardputer joins the home Wi-Fi, pairs and manages the nodes, and
 // shows their motion on two screens:
-//   * External Waveshare 2" ST7789V (top): range cone or ZONES list (key .).
+//   * External Waveshare 2" ST7789V (top): range cone, ZONES list or node HEALTH (key .).
 //   * Built-in screen (bottom): status, CONTACT/CLEAR banner, zone chips, graph.
+// It also logs every node's health to the microSD card, one CSV per day
+// (health_log.h), shows the files (settings > LOGS) and serves them on port 80.
 //
 // Keys:  , / = sensitivity (v2 cut-off -/+, sent to every node)
-//        n = cone zone   r = 5 m / 10 m   . = view   ` = settings
+//        n = cone zone   . = view   ` = settings
 // No calibration: v2 nodes need none.
 // =============================================================================
 #include <M5Cardputer.h>
@@ -377,6 +379,11 @@ static void serviceWifi() {
 }
 
 #include "zones_core.h"      // sensor nodes: storage, UDP reports, pairing, zone helpers
+#include "health_log.h"      // node health log on the SD card (one CSV per day)
+#include "web_logs.h"        // log download page (port 80)
+
+static void runLogsMenu();   // logs_ui.h
+static const int kMenuItems = 6;
 
 // --------------------------------------------------------------------------
 // In-app settings menu (ESC to open/close)
@@ -402,6 +409,9 @@ static void menuAdjust(int dir) {
         case 4:
             runNodesMenu();
             break;
+        case 5:
+            runLogsMenu();
+            break;
         default: break;
     }
 }
@@ -424,8 +434,8 @@ static void drawMenu() {
     canvas.drawString(hdr, (W - canvas.textWidth(hdr)) / 2, 3);
 
     // menu rows
-    const char* const labels[] = { "PALETTE", "SCREEN", "EXT PANEL", "WIFI NET", "NODES" };
-    const int numItems = 5, rowH = 20, textOff = 6;
+    const char* const labels[] = { "PALETTE", "SCREEN", "EXT PANEL", "WIFI NET", "NODES", "LOGS" };
+    const int numItems = kMenuItems, rowH = 17, textOff = 5;
     for (int i = 0; i < numItems; i++) {
         int  y   = 16 + i * rowH;
         bool sel = (i == (int)gMenuCursor);
@@ -448,6 +458,11 @@ static void drawMenu() {
                 break;
             }
             case 4: snprintf(val, sizeof(val), "%d >", gNodeCount); break;
+            case 5:
+                if (!gSdOk)          snprintf(val, sizeof(val), "NO SD >");
+                else if (!gHlog.on)  snprintf(val, sizeof(val), "OFF >");
+                else                 snprintf(val, sizeof(val), "ON %ud >", (unsigned)gHlog.keepDays);
+                break;
             default: val[0] = '\0'; break;
         }
         canvas.setTextColor(sel ? gColB : cDim, cBg);
@@ -593,7 +608,7 @@ static void drawBottom() {
 }
 
 
-static int gViewMode = 0;   // external screen: 0 = range cone, 1 = zones
+static int gViewMode = 0;   // external screen: 0 = range cone, 1 = zones, 2 = node health
 
 // --------------------------------------------------------------------------
 // External (top) screen: range cone
@@ -783,6 +798,7 @@ static void drawTop() {
 
 // --------------------------------------------------------------------------
 #include "zones_ui.h"        // ZONES view + NODES menu
+#include "logs_ui.h"         // LOGS menu, log viewer, HEALTH view
 
 // , / : move the v2 cut-off (lower = more sensitive) and send it to every node.
 static void changeSens(float d) {
@@ -801,10 +817,11 @@ static void serviceKeys() {
   if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return;
   auto st = M5Cardputer.Keyboard.keysState();
   if (gMenuOpen && st.enter && gMenuCursor == 4) { runNodesMenu(); return; }
+  if (gMenuOpen && st.enter && gMenuCursor == 5) { runLogsMenu(); return; }
   for (char c : st.word) {
     if (gMenuOpen) {
-      if      (c == ';') gMenuCursor = (gMenuCursor + 4) % 5;
-      else if (c == '.') gMenuCursor = (gMenuCursor + 1) % 5;
+      if      (c == ';') gMenuCursor = (gMenuCursor + kMenuItems - 1) % kMenuItems;
+      else if (c == '.') gMenuCursor = (gMenuCursor + 1) % kMenuItems;
       else if (c == ',') menuAdjust(-1);
       else if (c == '/') menuAdjust(+1);
       else if (c == '`') {
@@ -813,7 +830,7 @@ static void serviceKeys() {
       }
     } else {
       if      (c == '`')             { gMenuOpen = true; gMenuCursor = 0; }
-      else if (c == '.')             gViewMode = (gViewMode + 1) % 2;   // cone, zones
+      else if (c == '.')             gViewMode = (gViewMode + 1) % 3;   // cone, zones, health
       else if (c == 'n' || c == 'N') {                // cone: next zone (nodes, AUTO)
         if (gViewMode != 0) gViewMode = 0;            // first press just shows the cone
         else coneNext();
@@ -843,6 +860,7 @@ void setup() {
   applyBrightness();
 
   loadNodes();
+  hlogBegin();          // SD card + log settings (after the external panel: shared SPI bus)
   initWifi();
 }
 

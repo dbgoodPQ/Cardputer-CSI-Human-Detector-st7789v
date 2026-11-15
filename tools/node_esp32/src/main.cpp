@@ -10,7 +10,17 @@
 // result over UDP 10x/s. The Cardputer names the node and shows it as a zone.
 // Raw CSI logging (v2): a PC running tools/csi_lab/record.py sends
 // C,LOG,<mac>,<port> and the node streams every router CSI packet to it.
-// LED: on while motion is detected; fast blink when the Cardputer asks (BLINK LED).
+// LED: on while motion is detected; fast blink when the Cardputer asks (BLINK LED);
+// a 60 ms heartbeat flick every 5 s while the firmware is running (no flick = frozen).
+//
+// Self-recovery (fw 2.1.0-dev2, target 99.99% online):
+//   - task watchdog 30 s on the main loop -> reboot on any freeze;
+//   - link check: router stops answering pings for 15 s -> rejoin Wi-Fi; still no
+//     answer 60 s after the rejoin -> restart. Same if report broadcasts keep failing;
+//   - backup reconnect: offline 30 s -> rejoin (every 30 s); no healthy link for
+//     5 min -> restart;
+//   - free heap < 20 KB for 10 s -> restart;
+//   - health line every 10 s on UDP 4211 (tools/csi_lab/health.py).
 //
 // Reset: hold the BOOT button 5 s (after power-up) -> Wi-Fi forgotten, setup mode.
 // A freshly paired node that can't join the Wi-Fi within 60 s goes back to setup mode.
@@ -21,6 +31,9 @@
 #include <Preferences.h>
 #include <esp_wifi.h>
 #include <esp_now.h>
+#include <esp_system.h>
+#include <esp_task_wdt.h>
+#include <esp_attr.h>
 #include "ping/ping_sock.h"
 #include "lwip/ip_addr.h"
 #include "freertos/queue.h"
@@ -43,6 +56,76 @@ static char    gMyHex[13];
 // huge value and fires timeouts at once.
 static inline int32_t msSince(uint32_t now, uint32_t t) { return (int32_t)(now - t); }
 
+// ── watchdog + recovery counters ──────────────────────────────────────────────
+// Task watchdog: the run / setup loops subscribe and feed it every pass. If a
+// loop freezes (e.g. blocked inside a network call) the chip reboots in 30 s.
+static const uint32_t kWdtTimeoutS = 30;
+
+static void wdtStart() {
+    esp_task_wdt_init(kWdtTimeoutS, true);   // TWDT already runs (5 s): this updates it
+    esp_task_wdt_add(nullptr);               // watch the current (main) task
+}
+static inline void wdtFeed() { esp_task_wdt_reset(); }
+
+// Why the firmware restarted itself (kept across soft resets in RTC memory).
+enum : uint8_t { kCauseNone = 0, kCauseLink = 1, kCauseOffline = 2, kCauseHeap = 3, kCauseForget = 4 };
+
+// Counters survive soft resets, watchdog resets and panics (RTC slow memory, not
+// initialised at boot); a power cycle clears them (checked with the magic).
+struct RtcStats {
+    uint32_t magic;
+    uint32_t boots;     // boots since the last power-up
+    uint32_t wdt;       // boots caused by a watchdog
+    uint32_t link;      // link-check rejoins (router stopped answering)
+    uint32_t rejoin;    // backup reconnects (Wi-Fi down 30 s)
+    uint32_t cause;     // kCause* set just before the firmware restarts itself
+};
+static const uint32_t kRtcMagic = 0xC5100DE2u;
+static RTC_NOINIT_ATTR RtcStats gRtc;
+static uint8_t  gResetReason = 0;   // esp_reset_reason() of this boot
+static uint8_t  gPrevCause   = 0;   // gRtc.cause found at boot (why the last restart)
+
+static void rtcStatsBoot() {
+    if (gRtc.magic != kRtcMagic) { memset(&gRtc, 0, sizeof(gRtc)); gRtc.magic = kRtcMagic; }
+    const esp_reset_reason_t rr = esp_reset_reason();
+    gResetReason = (uint8_t)rr;
+    gRtc.boots++;
+    if (rr == ESP_RST_TASK_WDT || rr == ESP_RST_INT_WDT || rr == ESP_RST_WDT) gRtc.wdt++;
+    gPrevCause = (uint8_t)gRtc.cause;
+    gRtc.cause = kCauseNone;
+}
+
+// Why this boot happened, short form for the Cardputer (NODES > node, N report
+// field 13; the Cardputer keeps 5 chars): PWR EXT SW NET HEAP WDT PANIC BOD ?
+// NET / HEAP = the firmware restarted itself (link dead / heap low).
+static const char* bootReasonStr() {
+    switch ((esp_reset_reason_t)gResetReason) {
+        case ESP_RST_POWERON:  return "PWR";
+        case ESP_RST_EXT:      return "EXT";
+        case ESP_RST_SW:
+            if (gPrevCause == kCauseLink || gPrevCause == kCauseOffline) return "NET";
+            if (gPrevCause == kCauseHeap) return "HEAP";
+            return "SW";
+        case ESP_RST_PANIC:    return "PANIC";
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:      return "WDT";
+        case ESP_RST_BROWNOUT: return "BOD";
+        default:               return "?";
+    }
+}
+
+// Wi-Fi drops + link-check rejoins since this boot (N report field 12).
+static uint16_t gDrops = 0;
+
+static void restartFor(uint8_t cause, const char* why) {
+    gRtc.cause = cause;
+    Serial.printf("# restarting: %s\n", why);
+    Serial.flush();
+    delay(100);
+    ESP.restart();
+}
+
 // ── LED + BOOT button ─────────────────────────────────────────────────────────
 static void ledSet(bool on) { digitalWrite(NODE_LED_PIN, on ? HIGH : LOW); }
 
@@ -53,7 +136,7 @@ static void forgetAndRestart() {
     p.end();
     Serial.println("# Wi-Fi forgotten, restarting into setup mode");
     for (int i = 0; i < 20; i++) { ledSet(i & 1); delay(60); }
-    ESP.restart();
+    restartFor(kCauseForget, "forget");
 }
 
 static void checkBootButton() {
@@ -119,7 +202,9 @@ static void runSetupMode() {
     uint8_t  ch = 1;
     uint32_t lastHop = 0, lastHello = 0;
     setChannel(ch);
+    wdtStart();
     for (;;) {
+        wdtFeed();
         const uint32_t now = millis();
         checkBootButton();
         ledSet((now / 500) & 1);
@@ -194,6 +279,28 @@ static bool     gUdpOn     = false;
 static uint32_t gBlinkUntil = 0;
 static bool     gPresent   = false;
 static float    gMotion    = 0.0f;   // v2 probability, shown as motion level
+
+// Link health. The ping task's success callback stamps every router reply; the
+// main loop checks the stamps (see serviceHealth). The link check only arms once
+// the router has answered at least once since boot, so a router that never
+// answers pings can't cause a rejoin / restart loop.
+static volatile uint32_t gPingOkMs    = 0;      // millis() of the last ping reply
+static volatile uint32_t gPingOkCount = 0;      // replies since boot
+static volatile bool     gPingArmed   = false;  // router answered at least once
+static uint32_t gSendOkMs      = 0;             // last report broadcast that went out
+static uint8_t  gLastDiscReason = 0;            // last Wi-Fi disconnect reason
+
+static void pingOkCb(esp_ping_handle_t, void*) {
+    gPingOkMs = millis();
+    gPingOkCount++;
+    gPingArmed = true;
+}
+
+static void onWifiDisconnected(arduino_event_id_t, arduino_event_info_t info) {
+    // Reason 8 (ASSOC_LEAVE) is our own WiFi.disconnect(): keep the real cause.
+    if (info.wifi_sta_disconnected.reason != WIFI_REASON_ASSOC_LEAVE)
+        gLastDiscReason = info.wifi_sta_disconnected.reason;
+}
 
 static void csiCallback(void*, wifi_csi_info_t* info) {
     if (!info || !info->buf || info->len < 128 || !gBssidOk || !gCsiQ) return;
@@ -335,6 +442,7 @@ static void startPing() {
     cfg.task_prio       = 2;
     esp_ping_callbacks_t cbs;
     memset(&cbs, 0, sizeof(cbs));
+    cbs.on_ping_success = pingOkCb;
     if (esp_ping_new_session(&cfg, &cbs, &gPing) == ESP_OK) esp_ping_start(gPing);
     else gPing = nullptr;
     Serial.printf("# ping %s %d/s: %s\n", gw.toString().c_str(), gPingHz, gPing ? "on" : "FAILED");
@@ -431,6 +539,10 @@ static void serviceUdp() {
         if (sz <= 0) return;
         char buf[64];
         int n = gUdp.read(buf, sizeof(buf) - 1);
+        // Drop the rest of a longer datagram. WiFiUDP (Arduino-ESP32 2.0.x) keeps
+        // unread bytes and parsePacket() then returns 0 forever: one oversized
+        // packet used to make the node deaf to every later command.
+        gUdp.flush();
         if (n <= 0) continue;
         buf[n] = '\0';
         while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
@@ -461,26 +573,144 @@ static void serviceSensing(uint32_t now) {
     }
     if (msSince(now, lastRep) >= 100 && gUdpOn) {
         lastRep = now;
-        // N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<mode>,<detector>,<fw>
+        // N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<mode>,<detector>,<fw>,<uptime s>,<drops>,<boot>
+        // Worst case ~86 bytes: keep it under 92 (see sendHealth()).
         char line[96];
-        int n = snprintf(line, sizeof(line), "N,%s,%lu,%d,%.3f,%d,%u,%s,2,%s\n", gMyHex, (unsigned long)(++seq),
+        int n = snprintf(line, sizeof(line), "N,%s,%lu,%d,%.3f,%d,%u,%s,2,%s,%lu,%u,%s\n", gMyHex, (unsigned long)(++seq),
                          gPresent ? 1 : 0, gMotion, (int)gCsiRssi, (unsigned)gPktRate,
-                         gV2.ready ? "RUN" : "NO CSI", kFwVer);
+                         gV2.ready ? "RUN" : "NO CSI", kFwVer,
+                         (unsigned long)(now / 1000), (unsigned)gDrops, bootReasonStr());
+        if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
+        if (n > 0) {
         gUdp.beginPacket(IPAddress(255, 255, 255, 255), nodeproto::kReportPort);
         gUdp.write((const uint8_t*)line, n);
-        gUdp.endPacket();
+        if (gUdp.endPacket()) gSendOkMs = millis();
+        }
+    }
+}
+
+// Health line every 10 s on the report port, for tools/csi_lab/health.py. The
+// Cardputer ignores it (it only parses "N," lines). Keep it under 92 bytes: the
+// Cardputer reads datagrams into a 96-byte buffer and WiFiUDP stalls on a longer one.
+//   H,<mac>,<uptime_s>,<reset_reason>,<prev_cause>,<boots>,<wdt>,<link>,<rejoin>,
+//     <free_heap>,<min_heap>,<ping_ok_per_s>,<last_disc_reason>
+static void sendHealth(uint32_t now) {
+    static uint32_t lastH = 0, pingCnt0 = 0;
+    if (!gUdpOn || msSince(now, lastH) < 10000) return;
+    const uint32_t dt = lastH ? (uint32_t)msSince(now, lastH) : 0;
+    const uint32_t cnt = gPingOkCount;
+    const unsigned pingHz = dt ? (unsigned)(((cnt - pingCnt0) * 1000UL + dt / 2) / dt) : 0;
+    pingCnt0 = cnt;
+    lastH = now;
+    char line[92];
+    int n = snprintf(line, sizeof(line), "H,%s,%lu,%u,%u,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u\n",
+                     gMyHex, (unsigned long)(now / 1000), (unsigned)gResetReason, (unsigned)gPrevCause,
+                     (unsigned long)gRtc.boots, (unsigned long)gRtc.wdt, (unsigned long)gRtc.link,
+                     (unsigned long)gRtc.rejoin, (unsigned long)ESP.getFreeHeap(),
+                     (unsigned long)ESP.getMinFreeHeap(), pingHz, (unsigned)gLastDiscReason);
+    if (n <= 0) return;
+    if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
+    gUdp.beginPacket(IPAddress(255, 255, 255, 255), nodeproto::kReportPort);
+    gUdp.write((const uint8_t*)line, n);
+    gUdp.endPacket();
+}
+
+// ── self-recovery ─────────────────────────────────────────────────────────────
+static const uint32_t kLinkStaleMs     = 15000;    // no ping reply / no report sent -> rejoin
+static const uint32_t kLinkGiveUpMs    = 60000;    // ...still nothing this long after the rejoin -> restart
+static const uint32_t kRejoinEveryMs   = 30000;    // Wi-Fi down: rejoin this often
+static const uint32_t kNoLinkRestartMs = 300000;   // no healthy link for 5 min -> restart
+static const uint32_t kLowHeapBytes    = 20000;
+static const uint32_t kLowHeapMs       = 10000;
+
+static const char* gSsid = "";
+static const char* gPass = "";
+static uint32_t gLastBeginMs   = 0;   // last WiFi.begin()
+static uint32_t gSenseStartMs  = 0;   // sensing (re)started: grace period for the link check
+static uint32_t gLinkRejoinMs  = 0;   // link-check rejoin in progress since (0 = none)
+static uint32_t gLastHealthyMs = 0;   // Wi-Fi up and link OK
+static uint32_t gLowHeapSince  = 0;
+
+static void wifiBegin(uint32_t now) {
+    if (gPass[0]) WiFi.begin(gSsid, gPass); else WiFi.begin(gSsid);
+    gLastBeginMs = now;
+}
+
+static void wifiRejoin(uint32_t now, const char* why) {
+    Serial.printf("# rejoining Wi-Fi: %s\n", why);
+    WiFi.disconnect();
+    wifiBegin(now);
+}
+
+// Newer of two millis() stamps (wrap-safe).
+static inline uint32_t newer(uint32_t a, uint32_t b) { return msSince(a, b) >= 0 ? a : b; }
+
+static void serviceHealth(uint32_t now, bool up) {
+    // Link evidence: the last router ping reply, or the start of this sensing
+    // session (grace period after a reconnect, before the first reply).
+    const uint32_t pingEv = newer(gPingOkMs, gSenseStartMs);
+    const uint32_t sendEv = newer(gSendOkMs, gSenseStartMs);
+    const bool pingStale = gSensing && gPingArmed && msSince(now, pingEv) >= (int32_t)kLinkStaleMs;
+    const bool sendStale = gSensing && msSince(now, sendEv) >= (int32_t)kLinkStaleMs;
+
+    if (up && !pingStale && !sendStale) gLastHealthyMs = now;
+
+    // 1) Link check: Wi-Fi says "connected" but nothing gets through.
+    if (gLinkRejoinMs) {
+        // Recovered = traffic seen after the rejoin: a ping reply (or, if the
+        // router has never answered pings, a report that went out), at least 2 s
+        // after the rejoin so a reply still in flight from before it does not count.
+        const uint32_t ev = gPingArmed ? gPingOkMs : gSendOkMs;
+        if (gSensing && !sendStale && msSince(ev, gLinkRejoinMs) > 2000) {
+            Serial.println("# link back after rejoin");
+            gLinkRejoinMs = 0;
+        } else if (msSince(now, gLinkRejoinMs) >= (int32_t)kLinkGiveUpMs) {
+            restartFor(kCauseLink, "link still dead 60 s after rejoin");
+        }
+    } else if (pingStale || sendStale) {
+        gRtc.link++;
+        gDrops++;
+        gLinkRejoinMs = now ? now : 1;
+        wifiRejoin(now, pingStale ? "router stopped answering pings" : "reports not going out");
+    }
+
+    // 2) Backup reconnect (on top of Arduino's auto-reconnect).
+    if (!up && msSince(now, gLastBeginMs) >= (int32_t)kRejoinEveryMs) {
+        gRtc.rejoin++;
+        wifiRejoin(now, "offline 30 s");
+    }
+
+    // 3) Last resort: no healthy link for 5 min.
+    if (msSince(now, gLastHealthyMs) >= (int32_t)kNoLinkRestartMs)
+        restartFor(kCauseOffline, "no healthy link for 5 min");
+
+    // 4) Heap guard, checked once a second.
+    static uint32_t lastHeapChk = 0;
+    if (msSince(now, lastHeapChk) >= 1000) {
+        lastHeapChk = now;
+        if (ESP.getFreeHeap() < kLowHeapBytes) {
+            if (!gLowHeapSince) gLowHeapSince = now ? now : 1;
+            else if (msSince(now, gLowHeapSince) >= (int32_t)kLowHeapMs) restartFor(kCauseHeap, "free heap low");
+        } else {
+            gLowHeapSince = 0;
+        }
     }
 }
 
 static void runRunMode(const char* ssid, const char* pass, bool fresh) {
     Serial.printf("# RUN MODE: node %s joining %s\n", gMyHex, ssid);
+    gSsid = ssid; gPass = pass;
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
-    if (pass[0]) WiFi.begin(ssid, pass); else WiFi.begin(ssid);
+    WiFi.onEvent(onWifiDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
     const uint32_t t0 = millis();
+    wifiBegin(t0);
+    gLastHealthyMs = t0;
+    wdtStart();
     bool everConnected = false;
     for (;;) {
+        wdtFeed();
         const uint32_t now = millis();
         checkBootButton();
         const bool up = WiFi.status() == WL_CONNECTED;
@@ -490,28 +720,34 @@ static void runRunMode(const char* ssid, const char* pass, bool fresh) {
             }
             everConnected = true;
             startSensing();
+            gSenseStartMs = millis();
         } else if (!up && gSensing) {
-            Serial.println("# Wi-Fi lost");
+            gDrops++;
+            Serial.printf("# Wi-Fi lost (reason %u, drops %u)\n", (unsigned)gLastDiscReason, (unsigned)gDrops);
             stopSensing();
         }
-        if (!everConnected && fresh && now - t0 > 60000) {
+        if (!everConnected && fresh && msSince(now, t0) > 60000) {
             Serial.println("# could not join the Wi-Fi after pairing");
             forgetAndRestart();
         }
         if (gSensing) {
             serviceUdp();
             serviceSensing(now);
+            sendHealth(now);
         }
-        // LED: fast blink on request, else on while motion is detected; slow pulse while offline
+        serviceHealth(now, up);
+        // LED: fast blink on request; slow pulse while offline; else on while motion
+        // is detected, with a 60 ms heartbeat flick every 5 s (no flick = frozen).
         if (gBlinkUntil && (int32_t)(gBlinkUntil - now) > 0) ledSet((now / 100) & 1);
         else if (!up)                                         ledSet(((now / 1000) % 4) == 0);
-        else                                                  ledSet(gPresent);
+        else                                                  ledSet(((now % 5000) < 60) ? !gPresent : gPresent);
         delay(2);
     }
 }
 
 void setup() {
     Serial.begin(115200);
+    rtcStatsBoot();
     pinMode(NODE_LED_PIN, OUTPUT);
     pinMode(BOOT_PIN, INPUT_PULLUP);
     ledSet(false);
@@ -519,6 +755,8 @@ void setup() {
     WiFi.macAddress(gMyMac);
     nodeproto::macHex(gMyMac, gMyHex);
     Serial.printf("\n# CSI node fw %s  id NODE %02X%02X  mac %s\n", kFwVer, gMyMac[4], gMyMac[5], gMyHex);
+    Serial.printf("# boot %lu: reset reason %u, last self-restart cause %u, watchdog resets %lu\n",
+                  (unsigned long)gRtc.boots, (unsigned)gResetReason, (unsigned)gPrevCause, (unsigned long)gRtc.wdt);
 
     Preferences p;
     p.begin("csinode", true);

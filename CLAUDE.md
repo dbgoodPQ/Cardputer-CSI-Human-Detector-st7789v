@@ -7,7 +7,7 @@
 **Detect moving people through WiFi** using Channel State Information (CSI),
 room by room. Realistic target: **presence + motion** per room.
 
-## v2 architecture (branch `version2`)
+## v2 architecture (branch `main`)
 - **Sensors = nodes only.** ESP32-WROOM-32/32D boards (`tools/node_esp32`), one
   per room, measure CSI motion on their link to the home router and report it.
 - **Console = Cardputer ADV** (ESP32-S3). Joins the home Wi-Fi, pairs and
@@ -23,9 +23,13 @@ room by room. Realistic target: **presence + motion** per room.
 - **Displays (different content per screen, NOT a clone):**
   - Top = external **Waveshare 2" ST7789V** (320x240 @ rotation `EXT_ROTATION`=1),
     `.` toggles two views:
-    - **Range cone** (`drawTop()`): apex = viewer at the bottom, distance lines
-      every 1 m to 5 m or every 2 m to 10 m (`gRange10`, key r, saved in prefs).
-      CSI has no distance, so motion = whole-cone glow + `MOTION xx%`; no dots.
+    - **Range cone** (`drawTop()`): apex = viewer at the bottom; since fw 2.5 a
+      motion gauge: five 20% bands (labels 20%..100%), filled from the apex up
+      to the motion level, band colour by height (`coneBandCol()`: red <= 30%,
+      yellow 31-70%, green > 70%), alpha 0.62 + bright edge at the level; display
+      hold = fill at `ZoneView.heldMotion` (last motion with presence), alpha 0.28;
+      CLEAR = empty cone. Text has a black shadow. `MOTION xx%`; no dots. (Key r /
+      `gRange10` 5 m/10 m removed in 2.5; old prefs key "range10" is just unused.)
       Key n picks the zone (`gConeSel`: 0..n-1 = node, >= n = AUTO, default AUTO;
       `coneZoneNow()` in zones_core.h returns -1 with no nodes; AUTO sticky +10%
       margin). Zone name top-left, AUTO/MANUAL badge bottom-left. Empty states:
@@ -38,9 +42,9 @@ room by room. Realistic target: **presence + motion** per room.
     `>> ZONE <<` > CLEAR), zone chips, strongest-zone graph (0.5 line = cut-off),
     cut-off + key hints.
 - Keys: `,` `/` sensitivity = v2 smoothness cut-off `gSens` (0.30-0.60, step 0.02,
-  default 0.42, prefs "sens", sent as `C,SENS` on change + every 5 s), `n`, `r`,
+  default 0.42, prefs "sens", sent as `C,SENS` on change + every 5 s), `n`,
   `.`, `` ` `` menu (PALETTE, SCREEN, EXT PANEL, WIFI NET, NODES; version top-right).
-  No `c`/`x`: v2 needs no calibration.
+  No `c`/`x`/`r`: v2 needs no calibration, cone scale is fixed in %.
 - Display hold: v2 nodes report raw contact; `getZone()` keeps a zone present
   for `kDisplayHoldMs` (10 s) after its last reported motion (`ZoneView.held` =
   present only by hold; cone shows "MOTION / a few seconds ago"). v1 nodes
@@ -61,8 +65,9 @@ room by room. Realistic target: **presence + motion** per room.
   smoothness = lag-1 autocorrelation; motion if smoothness >= cut (0.4166; in
   contact: cut - 0.12); contact after 10 checks, clear after 3; NO CSI if < 20
   packets. prob = logistic(20.74 (smooth - cut)) = motion level. No hold, no
-  calibration. Broadcasts `N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<RUN|NO CSI>,2,<fw>`
-  on UDP 4211 at 10 Hz. Cardputer → nodes UDP 4212: `C,SENS,<cut>|BLINK,<mac>|FORGET,<mac>`;
+  calibration. Broadcasts `N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<RUN|NO CSI>,2,<fw>,<uptime s>,<drops>,<boot>`
+  on UDP 4211 at 10 Hz (last 3 fields since fw 2.5; Cardputer `NodeLive.hasDiag`, shown in
+  NODES > node; drops = Wi-Fi lost + link-check rejoins since boot (`gDrops`); boot = `bootReasonStr()`: PWR EXT SW NET HEAP WDT PANIC BOD ?, NET/HEAP from `gRtc.cause`). Cardputer → nodes UDP 4212: `C,SENS,<cut>|BLINK,<mac>|FORGET,<mac>`;
   from a PC: `C,LOG,<mac>,<port>`, `C,RATE,<mac>,<hz>`. v1 commands ignored.
   (v1 method up to fw 2.0-dev3: 52-subcarrier shape variance, calibration, 10 s hold.)
 - Raw CSI logging (fw 2.0-dev2+; 2.0-dev had a timeout bug): `C,LOG,<mac>,<port>` from a PC (keep-alive every
@@ -78,7 +83,23 @@ room by room. Realistic target: **presence + motion** per room.
   menu: list / node RENAME-BLINK-REMOVE / add-node flow). Zone i == node i. Names live on the
   Cardputer only (max 6 nodes, 10 chars). Node offline after 10 s silence.
 - Node: BOOT 5 s = forget creds; fresh pairing + no Wi-Fi in 60 s = forget;
-  LED (GPIO2) slow blink = setup, on = motion, fast = BLINK.
+  LED (GPIO2) slow blink = setup, on = motion, fast = BLINK, 60 ms heartbeat
+  flick every 5 s while running (no flick = frozen).
+- Node self-recovery (from `node-reliability`, fw 2.1.0-dev2, kept in 2.5; goal 99.99% online; user saw nodes go
+  offline for good with the LED steady on, back after reset): task watchdog 30 s
+  on the setup/run loops (`wdtStart`/`wdtFeed`); link check on ping replies
+  (`on_ping_success`, armed after the first reply): 15 s no reply or no report
+  sent -> WiFi rejoin, no recovery 60 s later -> restart; backup reconnect every
+  30 s while down (Arduino auto-reconnect stays on); no healthy link 5 min ->
+  restart; free heap < 20 KB for 10 s -> restart. Counters in RTC_NOINIT `gRtc`
+  (boots, wdt, link, rejoin, cause). Health line every 10 s on UDP 4211:
+  `H,<mac>,<uptime_s>,<reset_reason>,<prev_cause>,<boots>,<wdt>,<link>,<rejoin>,<heap>,<min_heap>,<ping_hz>,<disc>`
+  (Cardputer ignores it; keep < 92 B). `tools/csi_lab/health.py` logs it and
+  measures availability.
+- WiFiUDP (Arduino-ESP32 2.0.17) keeps unread bytes of a datagram and then
+  `parsePacket()` returns 0 forever: always `flush()` after `read()`. The
+  Cardputer (`serviceNodes()`) and nodes (`serviceUdp()`) both flush since fw
+  2.1.0-dev2. Still keep node broadcasts under 96 B (Cardputer reads 95 B).
 - Design mockups: claude.ai Design canvas "Sensor Nodes Screens".
 - CI builds `csi-node-esp32.bin` (merged: 0x1000 bootloader, 0x8000 partitions,
   0xe000 boot_app0, 0x10000 app; flash at 0x0).
@@ -87,7 +108,7 @@ room by room. Realistic target: **presence + motion** per room.
 - `pio run -e cardputer-radar-csi -t upload` — Cardputer console (name kept from
   v1; only build). CI output `cardputer-csi-st7789v.bin`, flash at 0x0.
 - `cd tools/node_esp32 && pio run -t upload` — sensor node. CI output `csi-node-esp32.bin`.
-- CI (`build.yml`) builds both on pushes to `main` and `version2`, PRs, manual runs.
+- CI (`build.yml`) builds both on pushes to `main`, PRs, manual runs.
 - Releases (`release.yml`, on `v*` tags; the user creates tags, this environment
   can't push them): full images `*.bin` at 0x0 (erase NVS → nodes must re-pair)
   and app-only `*-app.bin` at 0x10000 (keep Wi-Fi/pairing/settings). GitHub tends to
@@ -124,10 +145,15 @@ room by room. Realistic target: **presence + motion** per room.
 - `tools/csi_lab/` — PC tools (Python 3.10+, numpy, matplotlib): record.py
   (raw CSI from a node), replay.py (score v1/v2, --hold/--chain/--gate, plots),
   fit.py (v2 weights, leave-one-room-out), detectors.py (V1 exact port, V2),
+  health.py (node uptime/health logger, stdlib only),
   v2_host_test.cpp + v2_parity.py (compile csi_v2.h on the PC, compare with V2).
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
 
 ## Status (v2)
+🧪 fw 2.5.0-dev2 (main, merged from branches `v2.5` + `node-reliability` on 2026-11-15): node
+self-recovery from node-reliability + Cardputer cone in %, node diagnostics, no `r` key from v2.5, WiFiUDP
+flush fixes. Not yet tested on hardware. README previews in docs/screens re-rendered for 2.5
+(PIL, DejaVu Sans Mono, from the drawing code; not device photos).
 ✅ Cardputer is console only (this branch). 🧪 fw 2.1.0-dev1 (v2 on nodes,
 display hold, sensitivity keys, versioned binaries) not yet tested on hardware.
 ✅ External Waveshare 2" ST7789V working (pinout confirmed by user).
@@ -138,6 +164,12 @@ re-testing on hardware.
 ✅ Sensor nodes: user paired 3 nodes successfully (v1). User has 3 WROOM-32/32D
 boards, one per room.
 ✅ v2 constants tuned on 24 recordings (docs/V2_ROADMAP.md); 50 pings/s only.
+🧪 fw 2.1.0-dev2: node self-recovery (watchdog, link check, backup reconnect,
+heap guard, health line, LED heartbeat) and the WiFiUDP flush fix on nodes and
+Cardputer; not yet
+tested on hardware. Acceptance: router reboot / router off 30 min -> every node
+back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
+3 nodes >= 99.99% (health.py), router downtime excluded. Router: Cisco/Linksys E3000.
 
 ## Next steps (priority order)
 1. **Rework node motion detection** (docs/V2_ROADMAP.md, goal 2, path B: our
@@ -152,11 +184,15 @@ boards, one per room.
    (release tag v2.1.0-dev1), checks versions, records a 60 min empty (3 nodes in
    parallel, --port 4213/4214/4215), a walk per node (v2 parity on hardware) and
    "next room" per room; optionally --rate 100.
-2. **Signed reports and commands** (roadmap phase 5).
-3. **Presence event log** on the bottom screen with optional SD persistence.
-4. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)
+2. **Node uptime soak** (fw 2.5.0-dev2): flash all nodes, run
+   `python health.py --nodes 3 --csv health.csv` for 7 days, then the router
+   reboot / router off tests. Flash the Cardputer with 2.5.0-dev2 too (WiFiUDP
+   flush fix in `serviceNodes()`).
+3. **Signed reports and commands** (roadmap phase 5).
+4. **Presence event log** on the bottom screen with optional SD persistence.
+5. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)
    for still people + distance; dots in the range cone (design agreed).
-5. **ESP32-C5 nodes** (MonsterC5) later: different `wifi_csi_acquire_config_t`.
+6. **ESP32-C5 nodes** (MonsterC5) later: different `wifi_csi_acquire_config_t`.
 
 ## Hardware inventory (chip cheat-sheet)
 - C5 (best CSI): MonsterC5, AWOK Dual Touch (2x each), Marauder v8.

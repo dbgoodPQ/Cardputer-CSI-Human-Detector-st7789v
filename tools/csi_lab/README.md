@@ -33,6 +33,25 @@ python -m pip install -r requirements.txt
 The first time `record.py` runs, Windows asks whether Python may use the network:
 allow it on **private** networks, otherwise nothing is received.
 
+## Node uptime / health (fw 2.1.0-dev2+)
+
+`health.py` listens on UDP 4211 (like the Cardputer) and measures how much of
+the time each node is reachable. It also decodes the nodes' health line, so
+reboots, watchdog resets, link-check rejoins and heap trends show up. No extra
+packages needed.
+
+```powershell
+python health.py --nodes 3 --csv health.csv      # leave running; Ctrl+C = final summary
+```
+
+Every 60 s it prints, per node: **strict** availability (no report gap longer
+than 1 s), **cardputer** availability (gap shorter than 10 s, what the Cardputer
+shows as ON), downtime, and the node's uptime, boots, watchdog resets (`wdt`),
+link-check rejoins (`link`), backup reconnects (`rejoin`), free/min heap and ping
+replies per second. Events (OFFLINE / back ONLINE / booted with reset reason /
+rejoins with the last disconnect reason) are printed as they happen.
+Target 99.99%: at most 8.6 s down per day, 60 s per week.
+
 ## Record
 
 ```powershell

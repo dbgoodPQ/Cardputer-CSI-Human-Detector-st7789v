@@ -78,7 +78,23 @@ room by room. Realistic target: **presence + motion** per room.
   menu: list / node RENAME-BLINK-REMOVE / add-node flow). Zone i == node i. Names live on the
   Cardputer only (max 6 nodes, 10 chars). Node offline after 10 s silence.
 - Node: BOOT 5 s = forget creds; fresh pairing + no Wi-Fi in 60 s = forget;
-  LED (GPIO2) slow blink = setup, on = motion, fast = BLINK.
+  LED (GPIO2) slow blink = setup, on = motion, fast = BLINK, 60 ms heartbeat
+  flick every 5 s while running (no flick = frozen).
+- Node self-recovery (fw 2.1.0-dev2, goal 99.99% online; user saw nodes go
+  offline for good with the LED steady on, back after reset): task watchdog 30 s
+  on the setup/run loops (`wdtStart`/`wdtFeed`); link check on ping replies
+  (`on_ping_success`, armed after the first reply): 15 s no reply or no report
+  sent -> WiFi rejoin, no recovery 60 s later -> restart; backup reconnect every
+  30 s while down (Arduino auto-reconnect stays on); no healthy link 5 min ->
+  restart; free heap < 20 KB for 10 s -> restart. Counters in RTC_NOINIT `gRtc`
+  (boots, wdt, link, rejoin, cause). Health line every 10 s on UDP 4211:
+  `H,<mac>,<uptime_s>,<reset_reason>,<prev_cause>,<boots>,<wdt>,<link>,<rejoin>,<heap>,<min_heap>,<ping_hz>,<disc>`
+  (Cardputer ignores it; keep < 92 B). `tools/csi_lab/health.py` logs it and
+  measures availability.
+- WiFiUDP (Arduino-ESP32 2.0.17) keeps unread bytes of a datagram and then
+  `parsePacket()` returns 0 forever: always `flush()` after `read()`. The
+  Cardputer reads 95 B of each report, so nothing broadcast on 4211 may be longer
+  (Cardputer side still lacks the flush, see Next steps).
 - Design mockups: claude.ai Design canvas "Sensor Nodes Screens".
 - CI builds `csi-node-esp32.bin` (merged: 0x1000 bootloader, 0x8000 partitions,
   0xe000 boot_app0, 0x10000 app; flash at 0x0).
@@ -124,6 +140,7 @@ room by room. Realistic target: **presence + motion** per room.
 - `tools/csi_lab/` — PC tools (Python 3.10+, numpy, matplotlib): record.py
   (raw CSI from a node), replay.py (score v1/v2, --hold/--chain/--gate, plots),
   fit.py (v2 weights, leave-one-room-out), detectors.py (V1 exact port, V2),
+  health.py (node uptime/health logger, stdlib only),
   v2_host_test.cpp + v2_parity.py (compile csi_v2.h on the PC, compare with V2).
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
 
@@ -138,6 +155,11 @@ re-testing on hardware.
 ✅ Sensor nodes: user paired 3 nodes successfully (v1). User has 3 WROOM-32/32D
 boards, one per room.
 ✅ v2 constants tuned on 24 recordings (docs/V2_ROADMAP.md); 50 pings/s only.
+🧪 fw 2.1.0-dev2: node self-recovery (watchdog, link check, backup reconnect,
+heap guard, health line, LED heartbeat) and the WiFiUDP flush fix; not yet
+tested on hardware. Acceptance: router reboot / router off 30 min -> every node
+back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
+3 nodes >= 99.99% (health.py), router downtime excluded. Router: Cisco/Linksys E3000.
 
 ## Next steps (priority order)
 1. **Rework node motion detection** (docs/V2_ROADMAP.md, goal 2, path B: our
@@ -152,11 +174,15 @@ boards, one per room.
    (release tag v2.1.0-dev1), checks versions, records a 60 min empty (3 nodes in
    parallel, --port 4213/4214/4215), a walk per node (v2 parity on hardware) and
    "next room" per room; optionally --rate 100.
-2. **Signed reports and commands** (roadmap phase 5).
-3. **Presence event log** on the bottom screen with optional SD persistence.
-4. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)
+2. **Node uptime soak** (fw 2.1.0-dev2): flash all nodes, run
+   `python health.py --nodes 3 --csv health.csv` for 7 days, then the router
+   reboot / router off tests. Small follow-up on the Cardputer: `flush()` after
+   reading node reports in `serviceNodes()` (same WiFiUDP stall).
+3. **Signed reports and commands** (roadmap phase 5).
+4. **Presence event log** on the bottom screen with optional SD persistence.
+5. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)
    for still people + distance; dots in the range cone (design agreed).
-5. **ESP32-C5 nodes** (MonsterC5) later: different `wifi_csi_acquire_config_t`.
+6. **ESP32-C5 nodes** (MonsterC5) later: different `wifi_csi_acquire_config_t`.
 
 ## Hardware inventory (chip cheat-sheet)
 - C5 (best CSI): MonsterC5, AWOK Dual Touch (2x each), Marauder v8.

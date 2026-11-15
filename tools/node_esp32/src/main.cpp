@@ -95,6 +95,29 @@ static void rtcStatsBoot() {
     gRtc.cause = kCauseNone;
 }
 
+// Why this boot happened, short form for the Cardputer (NODES > node, N report
+// field 13; the Cardputer keeps 5 chars): PWR EXT SW NET HEAP WDT PANIC BOD ?
+// NET / HEAP = the firmware restarted itself (link dead / heap low).
+static const char* bootReasonStr() {
+    switch ((esp_reset_reason_t)gResetReason) {
+        case ESP_RST_POWERON:  return "PWR";
+        case ESP_RST_EXT:      return "EXT";
+        case ESP_RST_SW:
+            if (gPrevCause == kCauseLink || gPrevCause == kCauseOffline) return "NET";
+            if (gPrevCause == kCauseHeap) return "HEAP";
+            return "SW";
+        case ESP_RST_PANIC:    return "PANIC";
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:      return "WDT";
+        case ESP_RST_BROWNOUT: return "BOD";
+        default:               return "?";
+    }
+}
+
+// Wi-Fi drops + link-check rejoins since this boot (N report field 12).
+static uint16_t gDrops = 0;
+
 static void restartFor(uint8_t cause, const char* why) {
     gRtc.cause = cause;
     Serial.printf("# restarting: %s\n", why);
@@ -550,14 +573,19 @@ static void serviceSensing(uint32_t now) {
     }
     if (msSince(now, lastRep) >= 100 && gUdpOn) {
         lastRep = now;
-        // N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<mode>,<detector>,<fw>
+        // N,<mac>,<seq>,<pres>,<motion>,<rssi>,<rate>,<mode>,<detector>,<fw>,<uptime s>,<drops>,<boot>
+        // Worst case ~86 bytes: keep it under 92 (see sendHealth()).
         char line[96];
-        int n = snprintf(line, sizeof(line), "N,%s,%lu,%d,%.3f,%d,%u,%s,2,%s\n", gMyHex, (unsigned long)(++seq),
+        int n = snprintf(line, sizeof(line), "N,%s,%lu,%d,%.3f,%d,%u,%s,2,%s,%lu,%u,%s\n", gMyHex, (unsigned long)(++seq),
                          gPresent ? 1 : 0, gMotion, (int)gCsiRssi, (unsigned)gPktRate,
-                         gV2.ready ? "RUN" : "NO CSI", kFwVer);
+                         gV2.ready ? "RUN" : "NO CSI", kFwVer,
+                         (unsigned long)(now / 1000), (unsigned)gDrops, bootReasonStr());
+        if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
+        if (n > 0) {
         gUdp.beginPacket(IPAddress(255, 255, 255, 255), nodeproto::kReportPort);
         gUdp.write((const uint8_t*)line, n);
         if (gUdp.endPacket()) gSendOkMs = millis();
+        }
     }
 }
 
@@ -641,6 +669,7 @@ static void serviceHealth(uint32_t now, bool up) {
         }
     } else if (pingStale || sendStale) {
         gRtc.link++;
+        gDrops++;
         gLinkRejoinMs = now ? now : 1;
         wifiRejoin(now, pingStale ? "router stopped answering pings" : "reports not going out");
     }
@@ -693,7 +722,8 @@ static void runRunMode(const char* ssid, const char* pass, bool fresh) {
             startSensing();
             gSenseStartMs = millis();
         } else if (!up && gSensing) {
-            Serial.printf("# Wi-Fi lost (reason %u)\n", (unsigned)gLastDiscReason);
+            gDrops++;
+            Serial.printf("# Wi-Fi lost (reason %u, drops %u)\n", (unsigned)gLastDiscReason, (unsigned)gDrops);
             stopSensing();
         }
         if (!everConnected && fresh && msSince(now, t0) > 60000) {

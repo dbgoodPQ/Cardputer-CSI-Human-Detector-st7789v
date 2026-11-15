@@ -28,7 +28,6 @@ static M5Canvas        canvas(&M5Cardputer.Display);   // bottom (built-in) buff
 static LGFX_ExtST7789  extPanel;                       // external Waveshare 2" ST7789V
 static M5Canvas        topCanvas(&extPanel);           // top render buffer (240x180)
 static bool            extReady   = false;
-static bool            gRange10   = false;  // range cone: false = 5 m / 1 m lines, true = 10 m / 2 m
 // v2 sensitivity = smoothness cut-off sent to every node (C,SENS). Lower = more
 // sensitive. Default = the tuned value (docs/V2_ROADMAP.md).
 static const float     kSensDefault = 0.42f, kSensMin = 0.30f, kSensMax = 0.60f, kSensStep = 0.02f;
@@ -100,7 +99,6 @@ static void saveSettings() {
     prefs.putUChar("bright",    gBright);
     prefs.putUChar("extbright", gExtBright);
     prefs.putUChar("sens",      (uint8_t)lroundf(gSens * 100));   // v1 "thresh" no longer used
-    prefs.putUChar("range10",   gRange10 ? 1 : 0);
     prefs.end();
 }
 
@@ -111,7 +109,6 @@ static void loadSettings() {
     gBright    = prefs.getUChar("bright",   80);
     gExtBright = prefs.getUChar("extbright",80);
     uint8_t sens = prefs.getUChar("sens", (uint8_t)lroundf(kSensDefault * 100));
-    gRange10   = prefs.getUChar("range10", 0) != 0;
     prefs.end();
     if (sens >= lroundf(kSensMin * 100) && sens <= lroundf(kSensMax * 100)) gSens = sens / 100.0f;
     if (gColorIdx >= kNumPalettes) gColorIdx = 0;
@@ -601,11 +598,13 @@ static int gViewMode = 0;   // external screen: 0 = range cone, 1 = zones
 // --------------------------------------------------------------------------
 // External (top) screen: range cone
 // --------------------------------------------------------------------------
-// The cone shows one node's zone (or AUTO). The viewer sits at the apex; lines mark distance every 1 m
-// (5 m range) or every 2 m (10 m range, key r). Wi-Fi CSI knows THAT something
-// moves and how strongly, not where, so motion lights up the whole cone instead
-// of drawing a dot at an invented distance. Distance dots arrive with the
-// LD2410 mmWave radar (see CLAUDE.md, next steps).
+// The cone shows one node's zone (or AUTO). The viewer sits at the apex. Wi-Fi CSI
+// knows THAT something moves and how strongly, not where, so the cone is a motion
+// gauge: five bands of 20% from the apex (0%) to the top (100%), filled from the
+// apex up to the motion level. Each band keeps its colour: red up to 30%, yellow
+// 31-70%, green above 70%. In the display hold ("a few seconds ago") the fill
+// stays at the last live level, dimmed. CLEAR = empty cone. Distance dots arrive
+// with the LD2410 mmWave radar (see CLAUDE.md, next steps).
 static uint16_t blend565(uint16_t bg, uint16_t fg, float a) {
   if (a <= 0.0f) return bg;
   if (a >= 1.0f) return fg;
@@ -613,6 +612,11 @@ static uint16_t blend565(uint16_t bg, uint16_t fg, float a) {
   int fr = (fg >> 11) & 31, fgc = (fg >> 5) & 63, fb = fg & 31;
   int r = br + (int)((fr - br) * a), g = bgc + (int)((fgc - bgc) * a), b = bb + (int)((fb - bb) * a);
   return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+// Gauge band colour for a height in % (0 = apex): red <= 30, yellow 31-70, green > 70.
+static uint16_t coneBandCol(int pct, uint16_t red, uint16_t yel, uint16_t grn) {
+  return pct <= 30 ? red : (pct <= 70 ? yel : grn);
 }
 
 static void drawTop() {
@@ -643,25 +647,39 @@ static void drawTop() {
 
   topCanvas.fillSprite(TFT_BLACK);
 
-  // --- cone, row by row: background + motion glow (strong near the device) ---
-  const float glow = present ? zMotion : 0.0f;
+  // --- cone, row by row: background + motion gauge fill from the apex up ---
+  // Live motion: full colour. Display hold: last live level, dimmed. CLEAR: empty.
+  const float level = !present ? 0.0f : (zv.held ? zv.heldMotion : zMotion);
+  const float alpha = zv.held ? 0.28f : 0.62f;
+  const uint16_t cRed = topCanvas.color565(235, 40, 40);
+  const uint16_t cYel = topCanvas.color565(245, 205, 0);
+  const uint16_t cGrn = topCanvas.color565(0, 210, 80);
+  const int fillTopY = apexY - (int)lroundf(level * coneH);
   for (int y = topY; y <= apexY; ++y) {
     int hw = halfTop * (apexY - y) / coneH;
-    float depth = (float)(apexY - y) / coneH;           // 0 at the device, 1 at full range
-    float a = glow * (0.55f - 0.43f * depth);
-    topCanvas.drawFastHLine(apexX - hw, y, 2 * hw + 1, blend565(coneBg, cMag, a));
+    uint16_t col = coneBg;
+    if (level > 0.0f && y >= fillTopY) {
+      const int pct = (int)lroundf(100.0f * (apexY - y) / coneH);   // 0 at the device, 100 at the top
+      col = blend565(coneBg, coneBandCol(pct, cRed, cYel, cGrn), alpha);
+    }
+    topCanvas.drawFastHLine(apexX - hw, y, 2 * hw + 1, col);
+  }
+  if (level > 0.0f && fillTopY < apexY) {      // bright edge at the current level
+    const int hw  = halfTop * (apexY - fillTopY) / coneH;
+    const int pct = (int)lroundf(level * 100.0f);
+    const uint16_t edge = coneBandCol(pct, cRed, cYel, cGrn);
+    topCanvas.drawFastHLine(apexX - hw, fillTopY, 2 * hw + 1, zv.held ? blend565(coneBg, edge, 0.5f) : edge);
   }
   topCanvas.drawLine(apexX, apexY, apexX - halfTop, topY, cBorder);
   topCanvas.drawLine(apexX, apexY, apexX + halfTop, topY, cBorder);
 
-  // --- distance lines + labels ---
-  const int step = gRange10 ? 2 : 1;
+  // --- 20% band lines + labels ---
   topCanvas.setTextSize(1);
   for (int k = 1; k <= 5; ++k) {
     int y  = apexY - k * coneH / 5;
     int hw = halfTop * (apexY - y) / coneH;
     topCanvas.drawFastHLine(apexX - hw, y, 2 * hw + 1, cLine);
-    char lb[6]; snprintf(lb, sizeof(lb), "%dm", k * step);
+    char lb[6]; snprintf(lb, sizeof(lb), "%d%%", k * 20);
     topCanvas.setTextColor(cCyan);
     topCanvas.drawString(lb, apexX + hw - topCanvas.textWidth(lb) - 1, y - 9);
   }
@@ -688,13 +706,20 @@ static void drawTop() {
   } else {
     strcpy(big, "CLEAR"); bigCol = topCanvas.color565(0, 120, 150);
   }
+  // black shadow so the text stays readable over the coloured fill
   topCanvas.setTextSize(2);
+  const int bigX = (W - topCanvas.textWidth(big)) / 2;
+  topCanvas.setTextColor(TFT_BLACK);
+  topCanvas.drawString(big, bigX + 1, 59);
   topCanvas.setTextColor(bigCol);
-  topCanvas.drawString(big, (W - topCanvas.textWidth(big)) / 2, 58);
+  topCanvas.drawString(big, bigX, 58);
   if (small) {
     topCanvas.setTextSize(1);
+    const int smX = (W - topCanvas.textWidth(small)) / 2;
+    topCanvas.setTextColor(TFT_BLACK);
+    topCanvas.drawString(small, smX + 1, 83);
     topCanvas.setTextColor(topCanvas.color565(200, 160, 216));
-    topCanvas.drawString(small, (W - topCanvas.textWidth(small)) / 2, 82);
+    topCanvas.drawString(small, smX, 82);
   }
 
   // --- the viewer at the apex ---
@@ -719,7 +744,7 @@ static void drawTop() {
     topCanvas.drawString(autoMode ? "follows motion" : "n: next zone", 4, 152);
   }
 
-  // --- title bar: battery + range | contact state | mode pill ---
+  // --- title bar: battery + zone | contact state | mode pill ---
   topCanvas.setTextSize(1);
   topCanvas.fillRect(0, 0, W, 14, cBar);
   topCanvas.drawFastHLine(0, 13, W, cBorder);
@@ -744,7 +769,7 @@ static void drawTop() {
   snprintf(stats, sizeof(stats), "M:%d%% %ddBm", (int)lroundf(zMotion * 100), zRssi);
   topCanvas.setTextColor(cCyan);
   topCanvas.drawString(stats, 4, H - 10);
-  const char* hint = gNodeCount == 0 ? "[r] 5m/10m" : "[n] zone [r] 5m/10m";
+  const char* hint = gNodeCount == 0 ? "" : "[n] zone";
   topCanvas.setTextColor(topCanvas.color565(154, 106, 168));
   topCanvas.drawString(hint, W - topCanvas.textWidth(hint) - 4, H - 10);
 
@@ -789,7 +814,6 @@ static void serviceKeys() {
     } else {
       if      (c == '`')             { gMenuOpen = true; gMenuCursor = 0; }
       else if (c == '.')             gViewMode = (gViewMode + 1) % 2;   // cone, zones
-      else if (c == 'r' || c == 'R') { gRange10 = !gRange10; saveSettings(); }
       else if (c == 'n' || c == 'N') {                // cone: next zone (nodes, AUTO)
         if (gViewMode != 0) gViewMode = 0;            // first press just shows the cone
         else coneNext();

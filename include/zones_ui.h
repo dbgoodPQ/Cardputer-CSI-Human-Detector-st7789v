@@ -206,7 +206,7 @@ static void drawZones() {
     snprintf(thr, sizeof(thr), "cut %.2f", gSens);
     topCanvas.setTextColor(gColB);
     topCanvas.drawString(thr, 4, H - 10);
-    const char* hint = "[.] view  [c] cal all";
+    const char* hint = "[.] view  [n] cone";
     topCanvas.setTextColor(topCanvas.color565(154, 106, 168));
     topCanvas.drawString(hint, W - topCanvas.textWidth(hint) - 4, H - 10);
     topCanvas.drawRect(0, 0, W, H, cBorder);
@@ -320,14 +320,30 @@ static void runNodeEdit(int idx) {
         snprintf(line, sizeof(line), "NODE %02X%02X", gNodes[idx].mac[4], gNodes[idx].mac[5]);
         canvas.setTextColor(gColB); canvas.drawString(line, 62, 18);
         canvas.setTextColor(cLbl); canvas.drawString("SIGNAL", 8, 29);
-        if (v.online) snprintf(line, sizeof(line), "%ddBm  %u frames/s", v.rssi, (unsigned)v.rate);
+        const NodeLive& L = gLive[idx];
+        const bool diag = v.online && L.hasDiag;          // fw 2.5+: uptime, drops, boot reason
+        if (v.online) snprintf(line, sizeof(line), diag ? "%ddBm %u/s" : "%ddBm  %u frames/s", v.rssi, (unsigned)v.rate);
         else          snprintf(line, sizeof(line), "-");
         canvas.setTextColor(gColB); canvas.drawString(line, 62, 29);
+        if (diag) {     // right side: uptime | Wi-Fi drops since boot + why it booted
+            char up[16], age[12];
+            if (L.upS >= 86400UL) snprintf(age, sizeof(age), "%lu d", (unsigned long)(L.upS / 86400UL));
+            else                  fmtAge(L.upS * 1000UL, age, sizeof(age));
+            snprintf(up, sizeof(up), "up %s", age);
+            canvas.setTextColor(cLbl); canvas.drawString(up, canvas.width() - 8 - canvas.textWidth(up), 29);
+            char dr[20];
+            snprintf(dr, sizeof(dr), "drop %u %s", (unsigned)L.drops, L.boot);
+            const bool bad = L.drops > 0 || strcmp(L.boot, "WDT") == 0 || strcmp(L.boot, "NET") == 0
+                          || strcmp(L.boot, "PANIC") == 0 || strcmp(L.boot, "BOD") == 0
+                          || strcmp(L.boot, "HEAP") == 0;
+            canvas.setTextColor(bad ? uiCol(255, 140, 0) : cLbl);
+            canvas.drawString(dr, canvas.width() - 8 - canvas.textWidth(dr), 40);
+        }
         canvas.setTextColor(cLbl); canvas.drawString("STATUS", 8, 40);
         const char* st;
         if (!v.online)                         st = gLive[idx].lastMs ? "offline" : "waiting for report";
         else if (strcmp(v.mode, "NO CSI") == 0) st = "online, no router frames";
-        else if (gLive[idx].detector >= 2)      st = "online, detector v2";
+        else if (gLive[idx].detector >= 2)      st = diag ? "online, v2" : "online, detector v2";
         else                                    st = "online, old fw: update";
         canvas.setTextColor(v.online ? gColB : uiCol(255, 80, 80)); canvas.drawString(st, 62, 40);
         if (v.online) {   // firmware version, right-aligned on the ID line

@@ -93,8 +93,8 @@ room by room. Realistic target: **presence + motion** per room.
   measures availability.
 - WiFiUDP (Arduino-ESP32 2.0.17) keeps unread bytes of a datagram and then
   `parsePacket()` returns 0 forever: always `flush()` after `read()`. The
-  Cardputer reads 95 B of each report, so nothing broadcast on 4211 may be longer
-  (Cardputer side still lacks the flush, see Next steps).
+  Cardputer (`serviceNodes()`) and nodes (`serviceUdp()`) both flush since fw
+  2.1.0-dev2. Still keep node broadcasts under 96 B (Cardputer reads 95 B).
 - Design mockups: claude.ai Design canvas "Sensor Nodes Screens".
 - CI builds `csi-node-esp32.bin` (merged: 0x1000 bootloader, 0x8000 partitions,
   0xe000 boot_app0, 0x10000 app; flash at 0x0).
@@ -156,7 +156,8 @@ re-testing on hardware.
 boards, one per room.
 ✅ v2 constants tuned on 24 recordings (docs/V2_ROADMAP.md); 50 pings/s only.
 🧪 fw 2.1.0-dev2: node self-recovery (watchdog, link check, backup reconnect,
-heap guard, health line, LED heartbeat) and the WiFiUDP flush fix; not yet
+heap guard, health line, LED heartbeat) and the WiFiUDP flush fix on nodes and
+Cardputer; not yet
 tested on hardware. Acceptance: router reboot / router off 30 min -> every node
 back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
 3 nodes >= 99.99% (health.py), router downtime excluded. Router: Cisco/Linksys E3000.
@@ -176,8 +177,8 @@ back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
    "next room" per room; optionally --rate 100.
 2. **Node uptime soak** (fw 2.1.0-dev2): flash all nodes, run
    `python health.py --nodes 3 --csv health.csv` for 7 days, then the router
-   reboot / router off tests. Small follow-up on the Cardputer: `flush()` after
-   reading node reports in `serviceNodes()` (same WiFiUDP stall).
+   reboot / router off tests. Flash the Cardputer with 2.1.0-dev2 too (WiFiUDP
+   flush fix in `serviceNodes()`).
 3. **Signed reports and commands** (roadmap phase 5).
 4. **Presence event log** on the bottom screen with optional SD persistence.
 5. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)

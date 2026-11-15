@@ -248,6 +248,10 @@ static void serviceNodes() {
             if (sz <= 0) break;
             char buf[96];
             int n = gNodeUdp.read(buf, sizeof(buf) - 1);
+            // Drop the rest of a longer datagram. WiFiUDP (Arduino-ESP32 2.0.x)
+            // keeps unread bytes and parsePacket() then returns 0 forever: one
+            // packet over 95 bytes on port 4211 used to stop all node reports.
+            gNodeUdp.flush();
             if (n <= 0) continue;
             buf[n] = '\0';
             while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';

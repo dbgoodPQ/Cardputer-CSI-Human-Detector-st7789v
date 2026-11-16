@@ -46,8 +46,18 @@ room by room. Realistic target: **presence + motion** per room.
     cut-off + key hints.
 - Keys: `,` `/` sensitivity = v2 smoothness cut-off `gSens` (0.30-0.60, step 0.02,
   default 0.42, prefs "sens", sent as `C,SENS` on change + every 5 s), `n`,
-  `.`, `` ` `` menu (PALETTE, SCREEN, EXT PANEL, WIFI NET, NODES, LOGS; version top-right;
-  6 rows of 17 px, `kMenuItems`).
+  `.`, `` ` `` menu (PALETTE, SCREEN, EXT PANEL, SCREEN OFF, WIFI NET, NODES, LOGS; version
+  top-right; 7 rows of 15 px, `kMenuItems`, `kMenuNodes`/`kMenuLogs` = rows opened with enter).
+- Screen off (fw 2.6.0-dev6): SCREEN OFF = NEVER/1/5/10/30 min (prefs "radar"/"scroff", default 10).
+  No key press for that long -> both backlights 0 and no drawing (`gScreensOff`; logging, nodes,
+  web keep running). Any key wakes both and is swallowed (`screensWakeKey()` in `uiKey()` and
+  `serviceKeys()`). Wake re-sends SLPOUT/INVON/MADCTL/DISPON and re-inits the backlight PWM; never
+  call LGFX `init()` again (its `_bus->init()` restarts SPI2 and breaks the SD card).
+- External backlight check (issue #6: screen black with backlight off until reboot, cause
+  unknown): `checkExtBacklight()` every 5 s verifies GPIO4 is routed to LEDC channel
+  `EXT_BL_PWM_CH` (3) and the duty equals `gExtDuty`; else `reinitBacklight()` + SYS log line
+  "ext backlight lost (pin|level|pin+level), restored" (max every 10 min). Set the external
+  brightness only through `setExtBacklight()` so `gExtDuty` stays right.
   No `c`/`x`/`r`: v2 needs no calibration, cone scale is fixed in %.
 - Display hold: v2 nodes report raw contact; `getZone()` keeps a zone present
   for `kDisplayHoldMs` (10 s) after its last reported motion (`ZoneView.held` =
@@ -197,7 +207,8 @@ room by room. Realistic target: **presence + motion** per room.
   startup task, replaces W32Time; Linux: chrony config or bundled Python server). For next step 3.
 
 ## Status (v2)
-🧪 fw 2.6.0-dev5 (branch `fix-issues-5-6-7`, Cardputer: LOG SETUP > TIME SERVER for issue #7).
+🧪 fw 2.6.0-dev6 (branch `fix-issues-5-6-7`, Cardputer: external backlight check + SCREEN OFF
+for issue #6; dev5 = LOG SETUP > TIME SERVER for issue #7).
 🧪 fw 2.6.0-dev4 (branch `sd-logs`; dev4 = manual CLOCK for the no-internet network, dev3 = SD MISO fix, dev2 showed NO SD, Cardputer only): node health log on SD, LOGS list,
 HEALTH view, web download (2.6.0-dev1 also had an on-device log viewer, removed). Not yet tested on hardware (SD on the shared bus is the
 main risk). Design canvas "Cardputer Node Health Log Screens".
@@ -239,8 +250,9 @@ back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
    7 days, read online % in the HEALTH view (day files via the web page; health.py
    still works), then the router reboot / router off tests.
 3. **GitHub issues (branch `fix-issues-5-6-7`):** #7 clock from a LAN time server (done in
-   fw 2.6.0-dev5, not yet tested on hardware), #6 external screen goes off and doesn't come
-   back until reboot, #5 one node (WROOM-32, red power LED + purple GPIO2 LED) goes offline
+   fw 2.6.0-dev5, not yet tested on hardware), #6 external screen black + backlight off until
+   reboot, bottom screen fine (fw 2.6.0-dev6: backlight check + screen-off timer; check the day
+   log for "ext backlight lost"; if it goes dark with no such line, suspect wiring/power), #5 one node (WROOM-32, red power LED + purple GPIO2 LED) goes offline
    after ~30 min with the heartbeat stopped; log shows BOOT + WDT only after a power cycle.
 4. **Signed reports and commands** (roadmap phase 5).
 5. **Presence event log** on the bottom screen with optional SD persistence.

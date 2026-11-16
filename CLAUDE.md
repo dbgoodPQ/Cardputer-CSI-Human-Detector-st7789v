@@ -261,8 +261,9 @@ back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
    fw 2.6.0-dev5, not yet tested on hardware), #6 external screen black + backlight off until
    reboot, bottom screen fine (fw 2.6.0-dev6: backlight check + screen-off timer; check the day
    log for "ext backlight lost"; if it goes dark with no such line, suspect wiring/power), #5
-   (fw 2.6.0-dev7: RTC watchdog + reset step in the log; read the RESET/INFO lines next time), #5 one node (WROOM-32, red power LED + purple GPIO2 LED) goes offline
-   after ~30 min with the heartbeat stopped; log shows BOOT + WDT only after a power cycle.
+   one node (WROOM-32, red power LED + purple GPIO2 LED) goes offline
+   after ~30 min with the heartbeat stopped; log shows BOOT + WDT only after a power cycle
+   (fw 2.6.0-dev7: RTC watchdog + reset step; read the RESET / INFO lines in the day log).
 4. **Signed reports and commands** (roadmap phase 5).
 5. **Presence event log** on the bottom screen with optional SD persistence.
 6. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)

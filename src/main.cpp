@@ -594,7 +594,7 @@ static void drawBottom() {
   canvas.drawString(foot, 4, gy + gh + 4);
   if (!gClockOk && gHlog.on && now > 30000) {     // no internet time: ask for it once a while
     canvas.setTextColor(canvas.color565(255, 140, 0), TFT_BLACK);
-    canvas.drawString("set clock: ` > LOGS > s > CLOCK", 4, gy + gh + 15);
+    canvas.drawString("no clock: ` > LOGS > s > TIME SERVER", 4, gy + gh + 15);
   } else {
     canvas.setTextColor(cPurple, TFT_BLACK);
     canvas.drawString(".:view  ,/:sensitivity  `:menu", 4, gy + gh + 15);

@@ -45,10 +45,9 @@ in 43 minutes of empty rooms, walking detected about 99% of the time. Details an
   reason), `DROP` (lost the Wi-Fi), `SYS` (the Cardputer itself) and a `HEALTH` snapshot of every
   online node (uptime, signal, router frames/s, free memory) every minute. 5 days are kept by default.
   The date and time come from the internet over your Wi-Fi (the Cardputer has no clock battery).
-- **settings > LOGS**: the day files with a short summary (`all ok`, `2 off 1 boot`, ...). Open one
-  and it shows on the external screen; scroll with `;` `.` (line) and `,` `/` (page), `t`/`b` for
-  top/bottom, `e` for events only, `` ` `` to close. `s` opens LOG SETUP: logging on/off, snapshot
-  interval, days kept, time zone, web access.
+- **settings > LOGS**: the day files with a short summary (`all ok`, `2 off 1 boot`, ...) and their
+  size; `;` `.` scroll. The files themselves are read on a computer (below). `s` opens LOG SETUP:
+  logging on/off, snapshot interval, days kept, time zone, web access.
 - **HEALTH view** (key `.`): per node, online % today, uptime, drops and reboots today, a 24 h bar
   (green = online, red = was offline) and its last event. Replaces `tools/csi_lab/health.py`.
 - **Download from any computer on your Wi-Fi:** open `http://<cardputer-ip>/` (the IP is on the

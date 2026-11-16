@@ -9,10 +9,9 @@
 // ── shared helpers ───────────────────────────────────────────────────────────
 static void drawZones();
 static void drawHealth();        // logs_ui.h
-static bool gExtOwned = false;   // the log viewer draws the external screen itself
 
 static void drawExternalView() {
-    if (!extReady || gExtOwned) return;
+    if (!extReady) return;
     if (gViewMode == 0)      drawTop();
     else if (gViewMode == 1) drawZones();
     else                     drawHealth();

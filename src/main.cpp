@@ -798,7 +798,7 @@ static void drawTop() {
 
 // --------------------------------------------------------------------------
 #include "zones_ui.h"        // ZONES view + NODES menu
-#include "logs_ui.h"         // LOGS menu, log viewer, HEALTH view
+#include "logs_ui.h"         // LOGS menu, LOG SETUP, HEALTH view
 
 // , / : move the v2 cut-off (lower = more sensitive) and send it to every node.
 static void changeSens(float d) {

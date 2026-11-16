@@ -40,8 +40,6 @@ room by room. Realistic target: **presence + motion** per room.
     - **HEALTH** (`drawHealth()`, include/logs_ui.h, fw 2.6): per node online % today
       (`hlogAvail100`), uptime, drops/boots today, 24 h bar of 15-min slots
       (green ok, red was offline), last event. `gViewMode` 0 cone, 1 zones, 2 health.
-    - The log viewer takes the external screen over (`gExtOwned` stops
-      `drawExternalView()`); same 240x180 canvas zoomed, 13 lines of 40 chars.
   - Bottom = built-in 1.14" (240x135): Wi-Fi IP, nodes pill (`nodesTag()`:
     `2/3 ON`, green/orange/red), banner (toast 2 s > NO WIFI > NO NODES >
     `>> ZONE <<` > CLEAR), zone chips, strongest-zone graph (0.5 line = cut-off),
@@ -127,9 +125,9 @@ room by room. Realistic target: **presence + motion** per room.
   and get their real time at clock set. Time zones = POSIX strings in `kTzOpts`.
 - Settings prefs "hlog": on, snap (1/5/10/15/30 min), keep (1/3/5/7/14/30 days, default 5,
   today counts), tz (default New York), web. Keys in LOG SETUP: `,` `/` change.
-- Viewer (`runLogViewer`, logs_ui.h): index = offset of every 16th line + line numbers of event
-  lines (malloc, grows); reads 4 KB per redraw; today's file rescanned every 2 s and follows
-  the end. Keys `;` `.` `,` `/` `t` `b` `e` `` ` ``.
+- LOGS menu (`runLogsMenu`, logs_ui.h): day list only (date, summary, size; `;` `.` scroll,
+  `s` LOG SETUP). No on-device viewer: removed in 2.6.0-dev2 at the user's request (RAM:
+  indexing a day file needs ~15-20 KB, no PSRAM). Files are read via the web page.
 - Web (`include/web_logs.h`, WebServer port 80, `handleClient()` from `serviceNodes()`): `/`,
   `/logs.json`, `/logs/<day>.csv` (`?view=1` inline). Name checked with `ymdFromName()`.
 
@@ -171,7 +169,7 @@ room by room. Realistic target: **presence + motion** per room.
   plumbing, cone selection, chips, `nodesTag()`.
 - `include/zones_ui.h` — ZONES view, NODES menu, add-node flow.
 - `include/health_log.h` — node health log: SD, clock, events, day files, state, summary.
-- `include/logs_ui.h` — LOGS menu, LOG SETUP, log viewer, HEALTH view.
+- `include/logs_ui.h` — LOGS menu (day list), LOG SETUP, HEALTH view.
 - `include/web_logs.h` — log web page / downloads (port 80).
 - `tools/node_esp32/` — node firmware (PlatformIO, esp32dev).
 - `tools/csi_lab/` — PC tools (Python 3.10+, numpy, matplotlib): record.py
@@ -182,8 +180,8 @@ room by room. Realistic target: **presence + motion** per room.
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
 
 ## Status (v2)
-🧪 fw 2.6.0-dev1 (branch `sd-logs`, Cardputer only): node health log on SD, LOGS menu,
-viewer, HEALTH view, web download. Not yet tested on hardware (SD on the shared bus is the
+🧪 fw 2.6.0-dev2 (branch `sd-logs`, Cardputer only): node health log on SD, LOGS list,
+HEALTH view, web download (2.6.0-dev1 also had an on-device log viewer, removed). Not yet tested on hardware (SD on the shared bus is the
 main risk). Design canvas "Cardputer Node Health Log Screens".
 🧪 fw 2.5.0-dev2 (main, merged from branches `v2.5` + `node-reliability` on 2026-11-15): node
 self-recovery from node-reliability + Cardputer cone in %, node diagnostics, no `r` key from v2.5, WiFiUDP
@@ -219,8 +217,8 @@ back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
    (release tag v2.1.0-dev1), checks versions, records a 60 min empty (3 nodes in
    parallel, --port 4213/4214/4215), a walk per node (v2 parity on hardware) and
    "next room" per room; optionally --rate 100.
-2. **Node uptime soak**: nodes on 2.5.0-dev2, Cardputer on 2.6.0-dev1 with an SD card;
-   7 days, read online % in the HEALTH view / the day files (no PC needed; health.py
+2. **Node uptime soak**: nodes on 2.5.0-dev2, Cardputer on 2.6.0-dev2 with an SD card;
+   7 days, read online % in the HEALTH view (day files via the web page; health.py
    still works), then the router reboot / router off tests.
 3. **Signed reports and commands** (roadmap phase 5).
 4. **Presence event log** on the bottom screen with optional SD persistence.

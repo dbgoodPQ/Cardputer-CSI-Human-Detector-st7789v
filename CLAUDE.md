@@ -46,8 +46,18 @@ room by room. Realistic target: **presence + motion** per room.
     cut-off + key hints.
 - Keys: `,` `/` sensitivity = v2 smoothness cut-off `gSens` (0.30-0.60, step 0.02,
   default 0.42, prefs "sens", sent as `C,SENS` on change + every 5 s), `n`,
-  `.`, `` ` `` menu (PALETTE, SCREEN, EXT PANEL, WIFI NET, NODES, LOGS; version top-right;
-  6 rows of 17 px, `kMenuItems`).
+  `.`, `` ` `` menu (PALETTE, SCREEN, EXT PANEL, SCREEN OFF, WIFI NET, NODES, LOGS; version
+  top-right; 7 rows of 15 px, `kMenuItems`, `kMenuNodes`/`kMenuLogs` = rows opened with enter).
+- Screen off (fw 2.6.0-dev6): SCREEN OFF = NEVER/1/5/10/30 min (prefs "radar"/"scroff", default 10).
+  No key press for that long -> both backlights 0 and no drawing (`gScreensOff`; logging, nodes,
+  web keep running). Any key wakes both and is swallowed (`screensWakeKey()` in `uiKey()` and
+  `serviceKeys()`). Wake re-sends SLPOUT/INVON/MADCTL/DISPON and re-inits the backlight PWM; never
+  call LGFX `init()` again (its `_bus->init()` restarts SPI2 and breaks the SD card).
+- External backlight check (issue #6: screen black with backlight off until reboot, cause
+  unknown): `checkExtBacklight()` every 5 s verifies GPIO4 is routed to LEDC channel
+  `EXT_BL_PWM_CH` (3) and the duty equals `gExtDuty`; else `reinitBacklight()` + SYS log line
+  "ext backlight lost (pin|level|pin+level), restored" (max every 10 min). Set the external
+  brightness only through `setExtBacklight()` so `gExtDuty` stays right.
   No `c`/`x`/`r`: v2 needs no calibration, cone scale is fixed in %.
 - Display hold: v2 nodes report raw contact; `getZone()` keeps a zone present
   for `kDisplayHoldMs` (10 s) after its last reported motion (`ZoneView.held` =
@@ -97,9 +107,26 @@ room by room. Realistic target: **presence + motion** per room.
   30 s while down (Arduino auto-reconnect stays on); no healthy link 5 min ->
   restart; free heap < 20 KB for 10 s -> restart. Counters in RTC_NOINIT `gRtc`
   (boots, wdt, link, rejoin, cause). Health line every 10 s on UDP 4211:
-  `H,<mac>,<uptime_s>,<reset_reason>,<prev_cause>,<boots>,<wdt>,<link>,<rejoin>,<heap>,<min_heap>,<ping_hz>,<disc>`
-  (Cardputer ignores it; keep < 92 B). `tools/csi_lab/health.py` logs it and
-  measures availability.
+  `H,<mac>,<uptime_s>,<reset_reason>,<prev_cause>,<boots>,<wdt>,<link>,<rejoin>,<heap>,<min_heap>,<ping_hz>,<disc>,<prev_stage>,<rom_reset>,<chip_rev>`
+  (keep < 92 B, worst case 80). `tools/csi_lab/health.py` logs it and measures availability
+  (ignores the last 3 fields).
+- Issue #5 (fw 2.6.0-dev7): RTC watchdog 60 s (`rtc_wdt_*`, action RESET_SYSTEM so RTC memory
+  survives) on top of the 30 s task watchdog, both started first thing in `setup()` (`wdtStart()`,
+  idempotent). `stage(STG_*)` writes the current step into `gRtc.stage` (enum + `stageName()` in
+  node_proto.h); at boot it becomes `gPrevStage` (STG_POWER_UP = blank RTC memory). Cardputer
+  `hlogOnHealthLine()` logs `INFO chip rev R boots B wdt W` once per node per Cardputer start and
+  `RESET <reason> in <stage> rom<N> <name> rev<R>` after a crash-type boot (PANIC/WDTs/BOD).
+  The problem node is the only WROOM-32 (others WROOM-32D): older silicon (rev 0/1) has errata,
+  e.g. a spurious watchdog reset at power-up on rev 0.
+- Problem node facts (serial, 2026-11-16): NODE A1CC, mac 7C9EBDEDA1CC, ESP32-D0WDQ6 **rev 1.0**,
+  flash JEDEC manufacturer `d8` device `4016` (4 MB, not a common maker), CP210x USB on COM6.
+  Every power-up: ROM `flash read err, 1000` on the first read, then the ROM's RTC watchdog
+  (`RTCWDT_RTC_RESET`, rom 16) resets it and the second boot works -> this is the "BOOT WDT after
+  each replug", a board/flash power-up problem, not firmware. Suspect: the same flash not answering
+  at run time = the ~30 min freeze. If RESET lines confirm odd resets, replace the board.
+- Flashing: app-only `firmware.bin` goes at **0x10000** only. Writing it at 0x0 (user did once)
+  overwrites the bootloader (ROM loops on `flash read err, 1000`) and NVS (pairing lost); fix =
+  `pio run -t erase` + `pio run -t upload --upload-port COMx`, then pair again.
 - WiFiUDP (Arduino-ESP32 2.0.17) keeps unread bytes of a datagram and then
   `parsePacket()` returns 0 forever: always `flush()` after `read()`. The
   Cardputer (`serviceNodes()`) and nodes (`serviceUdp()`) both flush since fw
@@ -121,15 +148,21 @@ room by room. Realistic target: **presence + motion** per room.
   (heap, ping/s), `hlogService()` every second from `serviceNodes()` (OFFLINE after 10 s silence,
   not while the Cardputer's own Wi-Fi is down or < 15 s after it came back; online seconds; HEALTH
   snapshot every `snapMin` on the clock; flush every 10 s or 3.5 KB; state every 60 s; day roll).
-- Clock: no RTC. User's home network has NO internet, so NTP (`configTzTime`, still tried) never
-  answers there: the clock is set by hand in LOG SETUP > CLOCK (`runClockSet`, `hlogSetClock` ->
+- Clock: no RTC. User's home network has NO internet. Since fw 2.6.0-dev5 (issue #7): LOG SETUP >
+  TIME SERVER = IPv4 of an NTP server on the LAN (prefs "hlog"/"ntp", "" = AUTO internet pools;
+  the user runs `timeserver/` on an Ubuntu Server). `hlogNtpStart()` = `configTzTime` + sync
+  callback (`gNtpSynced` flag, logged in `hlogService`: "clock set (time server <ip>)", later
+  "clock corrected +N s" if >= 2 s) + `sntp_set_sync_interval` 1 h (SDK default is 3 h); restarted
+  on Wi-Fi back and on a server change. `hlogNtpStatus()` = ok / asking / no answer. Fallback:
+  the clock is set by hand in LOG SETUP > CLOCK (`runClockSet`, `hlogSetClock` ->
   settimeofday, SYS "clock set (by hand)"). System time survives software restarts (RTC timer;
   "clock set (kept over restart)"), not power-off. Last known time in prefs "hlog"/"last" every
   10 min pre-fills the CLOCK screen. Bottom screen shows "set clock: ..." after 30 s without a
   clock; settings LOGS row says NO CLOCK. Lines before the clock is set wait in `gPend[24]` and
   get their real time at clock set. Time zones = POSIX strings in `kTzOpts`.
 - Settings prefs "hlog": last (epoch), on, snap (1/5/10/15/30 min), keep (1/3/5/7/14/30 days, default 5,
-  today counts), tz (default New York), web. Keys in LOG SETUP: `,` `/` change.
+  today counts), tz (default New York), web, ntp. LOG SETUP rows (15 px): CLOCK, TIME SERVER, LOGGING,
+  SNAPSHOT, KEEP, TIME ZONE, WEB ACCESS. Keys in LOG SETUP: `,` `/` change.
 - LOGS menu (`runLogsMenu`, logs_ui.h): day list only (date, summary, size; `;` `.` scroll,
   `s` LOG SETUP). No on-device viewer: removed in 2.6.0-dev2 at the user's request (RAM:
   indexing a day file needs ~15-20 KB, no PSRAM). Files are read via the web page.
@@ -187,8 +220,12 @@ room by room. Realistic target: **presence + motion** per room.
   health.py (node uptime/health logger, stdlib only),
   v2_host_test.cpp + v2_parity.py (compile csi_v2.h on the PC, compare with V2).
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
+- `timeserver/` — offline LAN NTP server package for a USB key (Windows: PowerShell server as a
+  startup task, replaces W32Time; Linux: chrony config or bundled Python server). For next step 3.
 
 ## Status (v2)
+🧪 fw 2.6.0-dev7 (branch `fix-issues-5-6-7`): nodes RTC watchdog + reset step, Cardputer logs
+RESET/INFO (issue #5); dev6 = external backlight check + SCREEN OFF (#6); dev5 = TIME SERVER (#7).
 🧪 fw 2.6.0-dev4 (branch `sd-logs`; dev4 = manual CLOCK for the no-internet network, dev3 = SD MISO fix, dev2 showed NO SD, Cardputer only): node health log on SD, LOGS list,
 HEALTH view, web download (2.6.0-dev1 also had an on-device log viewer, removed). Not yet tested on hardware (SD on the shared bus is the
 main risk). Design canvas "Cardputer Node Health Log Screens".
@@ -229,14 +266,13 @@ back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
 2. **Node uptime soak**: nodes on 2.5.0-dev2, Cardputer on 2.6.0-dev4 with an SD card and the clock set;
    7 days, read online % in the HEALTH view (day files via the web page; health.py
    still works), then the router reboot / router off tests.
-3. **Clock from a local time server (later, user asked to keep it as a note):** the home
-   network has no internet, so add a LOG SETUP > TIME SERVER row (IP typed, or AUTO =
-   internet pools) and query it at start + hourly (`configTzTime(tz, ip)`); keep the manual
-   CLOCK as the fallback. Candidate servers on the LAN: Windows (W32Time server, off by
-   default), Linux / Raspberry Pi (chrony `allow 192.168.0.0/16`), a NAS (NTP service
-   checkbox). The Linksys E3000 can't serve time without internet. Other options weighed:
-   web page sets the clock from the visitor's browser time (option B), M5Stack Unit RTC
-   (HYM8563, I2C 0x51) on Grove, but Grove is reserved for the LD2410.
+3. **GitHub issues (branch `fix-issues-5-6-7`):** #7 clock from a LAN time server (done in
+   fw 2.6.0-dev5, not yet tested on hardware), #6 external screen black + backlight off until
+   reboot, bottom screen fine (fw 2.6.0-dev6: backlight check + screen-off timer; check the day
+   log for "ext backlight lost"; if it goes dark with no such line, suspect wiring/power), #5
+   one node (WROOM-32, red power LED + purple GPIO2 LED) goes offline
+   after ~30 min with the heartbeat stopped; log shows BOOT + WDT only after a power cycle
+   (fw 2.6.0-dev7: RTC watchdog + reset step; read the RESET / INFO lines in the day log).
 4. **Signed reports and commands** (roadmap phase 5).
 5. **Presence event log** on the bottom screen with optional SD persistence.
 6. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)

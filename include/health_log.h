@@ -12,9 +12,11 @@
 // the Wi-Fi), SYS (the Cardputer itself) and a HEALTH snapshot of every online node
 // every N minutes (uptime, signal, router frames/s, free memory).
 //
-// The Cardputer has no battery-backed clock. The time comes from the internet
-// (NTP) when the home Wi-Fi has internet, else it is set by hand in LOG SETUP >
-// CLOCK (hlogSetClock). It survives software restarts (the ESP32 RTC timer keeps
+// The Cardputer has no battery-backed clock. The time comes from NTP: a time
+// server on the LAN (LOG SETUP > TIME SERVER, an IP, for a network without
+// internet; see timeserver/) or the internet pools (AUTO), asked when the Wi-Fi
+// comes up and then every hour. Else it is set by hand in LOG SETUP > CLOCK
+// (hlogSetClock). It survives software restarts (the ESP32 RTC timer keeps
 // running), not a power-off; the last known time is kept in prefs to pre-fill the
 // CLOCK screen. Lines made before the clock is set wait in memory.
 // Per-day counters (online %, offline / boot / drop counts, 15-min bars) live in
@@ -31,6 +33,7 @@
 #include <SD.h>
 #include <time.h>
 #include <esp_system.h>
+#include <esp_sntp.h>
 
 // microSD slot of the Cardputer (ADV): SCK and MOSI are shared with the EXT header.
 static const int kSdSck = 40, kSdMiso = 39, kSdMosi = 14, kSdCs = 12;
@@ -59,8 +62,26 @@ static const uint8_t kKeepOpts[]  = { 1, 3, 5, 7, 14, 30 };
 static const int     kNumSnap     = sizeof(kSnapOpts);
 static const int     kNumKeep     = sizeof(kKeepOpts);
 
-struct HlogCfg { bool on; uint8_t snapMin; uint8_t keepDays; uint8_t tz; bool web; };
-static HlogCfg gHlog = { true, 1, 5, 0, true };
+struct HlogCfg { bool on; uint8_t snapMin; uint8_t keepDays; uint8_t tz; bool web; char ntp[16]; };
+static HlogCfg gHlog = { true, 1, 5, 0, true, "" };   // ntp "" = AUTO (internet pools)
+
+// "a.b.c.d" with every part 0-255.
+static bool ipv4Ok(const char* s) {
+    int parts = 0, val = -1;
+    for (const char* p = s;; p++) {
+        if (*p >= '0' && *p <= '9') {
+            val = (val < 0 ? 0 : val * 10) + (*p - '0');
+            if (val > 255) return false;
+        } else if (*p == '.' || *p == '\0') {
+            if (val < 0) return false;
+            parts++; val = -1;
+            if (*p == '\0') break;
+        } else {
+            return false;
+        }
+    }
+    return parts == 4;
+}
 
 static void hlogLoadCfg() {
     Preferences p;
@@ -70,7 +91,9 @@ static void hlogLoadCfg() {
     gHlog.keepDays = p.getUChar("keep", 5);
     gHlog.tz       = p.getUChar("tz", 0);
     gHlog.web      = p.getBool("web", true);
+    if (p.isKey("ntp")) p.getString("ntp", gHlog.ntp, sizeof(gHlog.ntp));
     p.end();
+    if (!ipv4Ok(gHlog.ntp)) gHlog.ntp[0] = '\0';
     bool ok = false;
     for (int i = 0; i < kNumSnap; i++) ok |= kSnapOpts[i] == gHlog.snapMin;
     if (!ok) gHlog.snapMin = 1;
@@ -88,6 +111,7 @@ static void hlogSaveCfg() {
     p.putUChar("keep", gHlog.keepDays);
     p.putUChar("tz", gHlog.tz);
     p.putBool("web", gHlog.web);
+    p.putString("ntp", gHlog.ntp);
     p.end();
 }
 
@@ -97,6 +121,10 @@ static uint32_t gSdSizeMB   = 0;
 static uint32_t gSdRetryMs  = 0;
 static bool     gClockOk    = false;
 static bool     gNtpStarted = false;
+static uint32_t gNtpStartMs = 0;           // millis() of the last (re)start of SNTP
+static uint32_t gNtpOkMs    = 0;           // millis() of the last answer, 0 = none since start
+static volatile bool gNtpSynced = false;   // set by the SNTP callback (lwIP task)
+static char     gNtpHost[16] = "";         // server SNTP was started with (lwIP keeps the pointer)
 static int32_t  gDayYmd     = 0;           // day of the open log file, yyyymmdd
 static char     gDayName[16] = "";         // "2026-11-15.csv"
 static uint32_t gLogLost    = 0;           // lines dropped (SD missing and buffer full)
@@ -117,6 +145,9 @@ struct NodeHealth {
     bool     seen, online, haveDiag;
     uint32_t lastUpS;
     uint16_t lastDrops;
+    // reset details from the health line (fw 2.6.0-dev7+, issue #5)
+    bool     hInfo;                        // INFO line logged since the Cardputer started
+    uint32_t hBoots, hUpS;                 // boots / uptime of the last health line
     // last health line (fw 2.1.0-dev2+)
     bool     hasH;
     uint32_t heap, minHeap;
@@ -489,13 +520,33 @@ static void hlogOnReport(int i, uint32_t prevMs, uint32_t now) {
     h->lastDrops = L.drops;
 }
 
+// Node reset reason (esp_reset_reason_t number), finer than resetCode().
+static const char* nodeResetName(int rr) {
+    switch (rr) {
+        case 1: return "PWR";    case 2: return "EXT";     case 3: return "SW";
+        case 4: return "PANIC";  case 5: return "INT WDT"; case 6: return "TASK WDT";
+        case 7: return "WDT";    case 9: return "BOD";     default: return "?";
+    }
+}
+// Classic ESP32 ROM reset reason (rtc_get_reset_reason), short.
+static const char* romResetName(int r) {
+    switch (r) {
+        case 1: return "PWR";     case 3: return "SW";      case 4: return "OWDT";
+        case 5: return "DSLP";    case 7: return "TG0WDT";  case 8: return "TG1WDT";
+        case 9: return "RTCWDT";  case 11: return "TGWDTC"; case 12: return "SWCPU";
+        case 13: return "RTCWDTC"; case 14: return "EXTCPU"; case 15: return "BROWNOUT";
+        case 16: return "RTCWDTR"; default: return "?";
+    }
+}
+
 // "H,<mac>,<uptime_s>,<reset_reason>,<prev_cause>,<boots>,<wdt>,<link>,<rejoin>,<heap>,<min_heap>,<ping_hz>,<disc>"
+// fw 2.6.0-dev7+ adds ",<prev_stage>,<rom_reset>,<chip_rev>" (issue #5).
 static void hlogOnHealthLine(char* line, uint32_t now) {
     (void)now;
-    char* f[13];
+    char* f[16];
     int nf = 0;
     char* save = nullptr;
-    for (char* t = strtok_r(line, ",", &save); t && nf < 13; t = strtok_r(nullptr, ",", &save)) f[nf++] = t;
+    for (char* t = strtok_r(line, ",", &save); t && nf < 16; t = strtok_r(nullptr, ",", &save)) f[nf++] = t;
     if (nf < 13) return;
     const int i = findNodeHex(f[1]);
     NodeHealth* h = nhFor(i);
@@ -505,6 +556,22 @@ static void hlogOnHealthLine(char* line, uint32_t now) {
     h->minHeap = strtoul(f[10], nullptr, 10);
     h->pingHz  = (uint16_t)atoi(f[11]);
     h->disc    = (uint8_t)atoi(f[12]);
+    if (nf < 16) return;
+
+    const uint32_t upS = strtoul(f[2], nullptr, 10), boots = strtoul(f[5], nullptr, 10);
+    const int rr = atoi(f[3]), stg = atoi(f[13]), rom = atoi(f[14]), rev = atoi(f[15]);
+    if (!h->hInfo) {                                   // once per node per Cardputer start
+        h->hInfo = true;
+        hlogNode(i, "INFO", "chip rev %d boots %lu wdt %lu", rev, (unsigned long)boots, strtoul(f[6], nullptr, 10));
+    }
+    // A new boot: boots counter or uptime changed back (or first line, fresh boot).
+    const bool newBoot = h->hBoots ? (boots != h->hBoots || upS < h->hUpS) : upS < 120;
+    const bool crash = rr == 4 || rr == 5 || rr == 6 || rr == 7 || rr == 9;
+    if (newBoot && crash)
+        hlogNode(i, "RESET", "%s in %s rom%d %s rev%d", nodeResetName(rr), nodeproto::stageName((uint8_t)stg),
+                 rom, romResetName(rom), rev);
+    h->hBoots = boots;
+    h->hUpS   = upS;
 }
 
 // ── clock ────────────────────────────────────────────────────────────────────
@@ -566,6 +633,46 @@ static bool hlogSetClock(int year, int mon, int day, int hour, int min) {
     return true;
 }
 
+// ── time server (NTP) ────────────────────────────────────────────────────────
+// Runs in the lwIP task: only raise a flag, hlogService() does the logging.
+static void hlogNtpCb(struct timeval*) { gNtpSynced = true; }
+
+// (Re)start SNTP with the configured server: asks at once, then every hour.
+static void hlogNtpStart() {
+    strncpy(gNtpHost, gHlog.ntp, sizeof(gNtpHost) - 1);
+    gNtpHost[sizeof(gNtpHost) - 1] = '\0';
+    sntp_set_time_sync_notification_cb(hlogNtpCb);
+    sntp_set_sync_interval(3600000);
+    if (gNtpHost[0]) configTzTime(kTzOpts[gHlog.tz].posix, gNtpHost);
+    else             configTzTime(kTzOpts[gHlog.tz].posix, "pool.ntp.org", "time.google.com", "time.nist.gov");
+    gNtpStarted = true;
+    gNtpStartMs = millis();
+    gNtpOkMs    = 0;
+}
+
+// LOG SETUP > TIME SERVER: "" = AUTO (internet), else an IPv4 address.
+static void hlogSetNtp(const char* ip) {
+    strncpy(gHlog.ntp, ip, sizeof(gHlog.ntp) - 1);
+    gHlog.ntp[sizeof(gHlog.ntp) - 1] = '\0';
+    hlogSys("time server %s", gHlog.ntp[0] ? gHlog.ntp : "AUTO (internet)");
+    if (wifiReady) hlogNtpStart();
+    else           gNtpStarted = false;          // starts when the Wi-Fi is up
+}
+
+// Short state for LOG SETUP; level 0 ok, 1 waiting, 2 no answer.
+static void hlogNtpStatus(char* out, size_t n, int& level) {
+    const uint32_t now = millis();
+    if (!wifiReady || !gNtpStarted) { snprintf(out, n, "no Wi-Fi"); level = 1; return; }
+    if (gNtpOkMs) {
+        const uint32_t m = (now - gNtpOkMs) / 60000;
+        if (m == 0) snprintf(out, n, "ok");
+        else        snprintf(out, n, "ok %lum", (unsigned long)m);
+        level = 0; return;
+    }
+    if (now - gNtpStartMs < 20000) { snprintf(out, n, "asking"); level = 1; return; }
+    snprintf(out, n, "no answer"); level = 2;
+}
+
 // ── per-second work, called from serviceNodes() ─────────────────────────────
 static uint32_t gWifiUpMs = 0;
 
@@ -577,19 +684,31 @@ static void hlogService(uint32_t now) {
         gSdRetryMs = now;
         if (hlogMount()) { hlogSys("SD card ready %lu MB", (unsigned long)gSdSizeMB); }
     }
-    if (wifiReady && !gNtpStarted) {
-        configTzTime(kTzOpts[gHlog.tz].posix, "pool.ntp.org", "time.google.com", "time.nist.gov");
-        gNtpStarted = true;
+    static time_t   seenT  = 0;                       // wall time seen on the last pass
+    static uint32_t seenMs = 0;
+    if (wifiReady && !gNtpStarted) hlogNtpStart();
+    if (gNtpSynced) {                                 // the time server answered
+        gNtpSynced = false;
+        gNtpOkMs = now ? now : 1;
+        char how[40];
+        snprintf(how, sizeof(how), "time server %s", gNtpHost[0] ? gNtpHost : "internet");
+        if (!gClockOk) {
+            hlogClockReady(how);
+        } else if (seenT) {                           // log real corrections only
+            const long jump = (long)(time(nullptr) - (seenT + (time_t)((now - seenMs) / 1000)));
+            if (jump >= 2 || jump <= -2) { hlogSys("clock corrected %+ld s (%s)", jump, how); hlogSaveLast(time(nullptr)); }
+        }
     }
-    // valid time: NTP answered, or the RTC timer kept it over a software restart
-    if (!gClockOk && time(nullptr) > 1700000000) hlogClockReady(gNtpStarted ? "NTP" : "kept over restart");
+    // valid time without an answer: the RTC timer kept it over a software restart
+    if (!gClockOk && time(nullptr) > 1700000000) hlogClockReady("kept over restart");
+    seenT = time(nullptr); seenMs = now;
 
     if (now - lastTick < 1000) return;
     lastTick = now;
 
     if (wifiReady != wasWifi) {
         if (wifiReady) { gWifiUpMs = now; if (everWifi) hlogSys("Wi-Fi back %s", wifiIP); everWifi = true; }
-        else           hlogSys("Wi-Fi lost");
+        else           { hlogSys("Wi-Fi lost"); gNtpStarted = false; }   // ask again when back
         wasWifi = wifiReady;
     }
 

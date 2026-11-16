@@ -33,6 +33,10 @@
 #ifndef EXT_SD_MISO
 #define EXT_SD_MISO  39          // microSD data-out, shares SCK/MOSI with this panel
 #endif
+// LEDC channel of the backlight PWM (7 is used by the built-in screen's backlight).
+#ifndef EXT_BL_PWM_CH
+#define EXT_BL_PWM_CH 3
+#endif
 // Landscape (320x240). 1 matches the Cardputer's built-in screen; use 3 to turn the picture 180°.
 #ifndef EXT_ROTATION
 #define EXT_ROTATION 1
@@ -88,12 +92,15 @@ public:
             cfg.pin_bl      = EXT_TFT_BL;
             cfg.invert      = false;
             cfg.freq        = 12000;
-            cfg.pwm_channel = 3;             // channel 7 is used by the built-in screen's backlight
+            cfg.pwm_channel = EXT_BL_PWM_CH;
             _light_instance.config(cfg);
             _panel_instance.setLight(&_light_instance);
         }
         setPanel(&_panel_instance);
     }
+    // Sets the backlight PWM up again (GPIO4 -> LEDC channel) at brightness 0-255.
+    // Used when the backlight was found off (issue #6) and on wake from screen-off.
+    bool reinitBacklight(uint8_t brightness) { return _light_instance.init(brightness); }
 };
 
 #endif // EXT_PANEL_H

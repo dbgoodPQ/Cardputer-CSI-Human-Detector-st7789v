@@ -21,6 +21,8 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include "esp_wifi.h"
+#include "soc/gpio_reg.h"        // backlight check (issue #6): GPIO matrix output select
+#include "soc/gpio_sig_map.h"    // LEDC_LS_SIG_OUT0_IDX
 #include "fw_version.h"
 
 static bool  wifiReady = false;
@@ -66,10 +68,23 @@ static void applyPalette(uint8_t idx) {
     gColB = rgb565(kPalettes[idx].bR, kPalettes[idx].bG, kPalettes[idx].bB);
 }
 
+// Screen-off after no key press (settings > SCREEN OFF). 0 = never.
+static const uint8_t kScrOffOpts[] = { 0, 1, 5, 10, 30 };
+static const int     kNumScrOff    = sizeof(kScrOffOpts);
+static uint8_t  gScrOffMin   = 10;
+static bool     gScreensOff  = false;
+static uint32_t gLastInputMs = 0;
+static uint32_t gExtDuty     = 0;    // LEDC duty the external backlight should have (issue #6 check)
+
+// EXT panel BL is on GPIO4 (PWM). Remember the duty so serviceScreens() can spot it being lost.
+static void setExtBacklight() {
+    extPanel.setBrightness((uint8_t)((uint32_t)gExtBright * 255 / 100));
+    gExtDuty = ledcRead(EXT_BL_PWM_CH);
+}
+
 static void applyBrightness() {
     M5Cardputer.Display.setBrightness((uint8_t)((uint32_t)gBright * 255 / 100));
-    // EXT panel BL is on GPIO4 (PWM) — set the external backlight directly
-    extPanel.setBrightness((uint8_t)((uint32_t)gExtBright * 255 / 100));
+    setExtBacklight();
 }
 
 // ST7789V fork: the Waveshare module's BL pin is wired to GPIO4, so EXT PANEL
@@ -101,6 +116,7 @@ static void saveSettings() {
     prefs.putUChar("bright",    gBright);
     prefs.putUChar("extbright", gExtBright);
     prefs.putUChar("sens",      (uint8_t)lroundf(gSens * 100));   // v1 "thresh" no longer used
+    prefs.putUChar("scroff",    gScrOffMin);
     prefs.end();
 }
 
@@ -111,7 +127,11 @@ static void loadSettings() {
     gBright    = prefs.getUChar("bright",   80);
     gExtBright = prefs.getUChar("extbright",80);
     uint8_t sens = prefs.getUChar("sens", (uint8_t)lroundf(kSensDefault * 100));
+    gScrOffMin = prefs.getUChar("scroff", 10);
     prefs.end();
+    bool scrOk = false;
+    for (int i = 0; i < kNumScrOff; i++) scrOk |= kScrOffOpts[i] == gScrOffMin;
+    if (!scrOk) gScrOffMin = 10;
     if (sens >= lroundf(kSensMin * 100) && sens <= lroundf(kSensMax * 100)) gSens = sens / 100.0f;
     if (gColorIdx >= kNumPalettes) gColorIdx = 0;
     if (gBright    < 10 || gBright    > 100) gBright    = 80;
@@ -199,6 +219,7 @@ static bool runWifiPicker() {
         for (;;) {
             M5Cardputer.update();
             if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+                gLastInputMs = millis();        // activity: no screen-off right after the picker
                 auto w = M5Cardputer.Keyboard.keysState().word;
                 if (!w.empty()) return w[0];
             }
@@ -383,7 +404,8 @@ static void serviceWifi() {
 #include "web_logs.h"        // log download page (port 80)
 
 static void runLogsMenu();   // logs_ui.h
-static const int kMenuItems = 6;
+static const int kMenuItems = 7;
+static const int kMenuNodes = 5, kMenuLogs = 6;   // rows opened with enter
 
 // --------------------------------------------------------------------------
 // In-app settings menu (ESC to open/close)
@@ -400,16 +422,22 @@ static void menuAdjust(int dir) {
             break;
         case 2:
             gExtBright = (uint8_t)constrain((int)gExtBright + (dir > 0 ? 10 : -10), 10, 100);
-            extPanel.setBrightness((uint8_t)((uint32_t)gExtBright * 255 / 100));
+            setExtBacklight();
             break;
-        case 3:
+        case 3: {
+            int k = 0;
+            for (int i = 0; i < kNumScrOff; i++) if (kScrOffOpts[i] == gScrOffMin) k = i;
+            gScrOffMin = kScrOffOpts[(k + kNumScrOff + (dir > 0 ? 1 : -1)) % kNumScrOff];
+            break;
+        }
+        case 4:
             gMenuOpen = false;
             runWifiPicker();
             break;
-        case 4:
+        case kMenuNodes:
             runNodesMenu();
             break;
-        case 5:
+        case kMenuLogs:
             runLogsMenu();
             break;
         default: break;
@@ -434,10 +462,10 @@ static void drawMenu() {
     canvas.drawString(hdr, (W - canvas.textWidth(hdr)) / 2, 3);
 
     // menu rows
-    const char* const labels[] = { "PALETTE", "SCREEN", "EXT PANEL", "WIFI NET", "NODES", "LOGS" };
-    const int numItems = kMenuItems, rowH = 17, textOff = 5;
+    const char* const labels[] = { "PALETTE", "SCREEN", "EXT PANEL", "SCREEN OFF", "WIFI NET", "NODES", "LOGS" };
+    const int numItems = kMenuItems, rowH = 15, textOff = 4;
     for (int i = 0; i < numItems; i++) {
-        int  y   = 16 + i * rowH;
+        int  y   = 15 + i * rowH;
         bool sel = (i == (int)gMenuCursor);
 
         canvas.setTextColor(sel ? gColA : TFT_BLACK, cBg);
@@ -451,14 +479,17 @@ static void drawMenu() {
             case 0: snprintf(val, sizeof(val), "%s", kPalettes[gColorIdx].name); break;
             case 1: snprintf(val, sizeof(val), "%d%%", (int)gBright); break;
             case 2: snprintf(val, sizeof(val), "%d%%", (int)gExtBright); break;
-            case 3: {
+            case 3: if (gScrOffMin) snprintf(val, sizeof(val), "after %u min", (unsigned)gScrOffMin);
+                    else            snprintf(val, sizeof(val), "NEVER");
+                    break;
+            case 4: {
                 String cur = WiFi.SSID();
                 if (cur.length() > 0) snprintf(val, sizeof(val), "%.12s", cur.c_str());
                 else strncpy(val, "> SCAN", sizeof(val));
                 break;
             }
-            case 4: snprintf(val, sizeof(val), "%d >", gNodeCount); break;
-            case 5:
+            case kMenuNodes: snprintf(val, sizeof(val), "%d >", gNodeCount); break;
+            case kMenuLogs:
                 if (!gSdOk)          snprintf(val, sizeof(val), "NO SD >");
                 else if (!gHlog.on)  snprintf(val, sizeof(val), "OFF >");
                 else if (!gClockOk)  snprintf(val, sizeof(val), "NO CLOCK >");
@@ -469,7 +500,7 @@ static void drawMenu() {
         canvas.setTextColor(sel ? gColB : cDim, cBg);
         canvas.drawString(val, W - canvas.textWidth(val) - 8, y + textOff);
 
-        if (i < numItems - 1) canvas.drawFastHLine(8, y + rowH - 2, W - 16, cSep);
+        if (i < numItems - 1) canvas.drawFastHLine(8, y + rowH - 1, W - 16, cSep);
     }
 
     // footer
@@ -594,7 +625,7 @@ static void drawBottom() {
   canvas.drawString(foot, 4, gy + gh + 4);
   if (!gClockOk && gHlog.on && now > 30000) {     // no internet time: ask for it once a while
     canvas.setTextColor(canvas.color565(255, 140, 0), TFT_BLACK);
-    canvas.drawString("set clock: ` > LOGS > s > CLOCK", 4, gy + gh + 15);
+    canvas.drawString("no clock: ` > LOGS > s > TIME SERVER", 4, gy + gh + 15);
   } else {
     canvas.setTextColor(cPurple, TFT_BLACK);
     canvas.drawString(".:view  ,/:sensitivity  `:menu", 4, gy + gh + 15);
@@ -803,6 +834,67 @@ static void drawTop() {
 }
 
 // --------------------------------------------------------------------------
+// Screens off after no key press, and the external backlight check (issue #6:
+// the external screen went black with its backlight off until a reboot).
+// --------------------------------------------------------------------------
+static void screensOff() {
+  gScreensOff = true;
+  M5Cardputer.Display.setBrightness(0);
+  extPanel.setBrightness(0);
+}
+
+// Wake: both backlights back, and the external panel woken up again without
+// restarting the SPI bus (LGFX init() would, and that breaks the SD card).
+static void screensOn() {
+  gScreensOff = false;
+  M5Cardputer.Display.setBrightness((uint8_t)((uint32_t)gBright * 255 / 100));
+  if (extReady) {
+    extPanel.wakeup();                    // SLPOUT
+    delay(10);
+    extPanel.invertDisplay(false);        // INVON (the panel config inverts)
+    extPanel.setRotation(EXT_ROTATION);   // MADCTL + COLMOD
+    extPanel.startWrite();
+    extPanel.writeCommand(0x29);          // DISPON
+    extPanel.endWrite();
+  }
+  extPanel.reinitBacklight((uint8_t)((uint32_t)gExtBright * 255 / 100));
+  gExtDuty = ledcRead(EXT_BL_PWM_CH);
+}
+
+// Any key press: true if it only woke the screens (the caller then ignores it).
+static bool screensWakeKey() {
+  gLastInputMs = millis();
+  if (!gScreensOff) return false;
+  screensOn();
+  return true;
+}
+
+// GPIO4 still routed to the backlight's LEDC channel, and the duty unchanged?
+static void checkExtBacklight(uint32_t now) {
+  const uint32_t sel = REG_READ(GPIO_FUNC0_OUT_SEL_CFG_REG + 4 * EXT_TFT_BL) & GPIO_FUNC0_OUT_SEL_V;
+  const bool pinOk = sel == (uint32_t)(LEDC_LS_SIG_OUT0_IDX + EXT_BL_PWM_CH)
+                  && (REG_READ(GPIO_ENABLE_REG) & BIT(EXT_TFT_BL));
+  const bool lvlOk = ledcRead(EXT_BL_PWM_CH) == gExtDuty;
+  if (pinOk && lvlOk) return;
+  extPanel.reinitBacklight((uint8_t)((uint32_t)gExtBright * 255 / 100));
+  gExtDuty = ledcRead(EXT_BL_PWM_CH);
+  static uint32_t lastLog = 0, missed = 0;           // log at most every 10 min
+  if (lastLog && now - lastLog < 600000) { missed++; return; }
+  lastLog = now;
+  hlogSys("ext backlight lost (%s), restored%s", !pinOk ? (lvlOk ? "pin" : "pin+level") : "level",
+          missed ? " (again)" : "");
+  missed = 0;
+}
+
+static void serviceScreens(uint32_t now) {
+  if (gLastInputMs == 0) gLastInputMs = now;
+  if (gScreensOff) return;
+  if (gScrOffMin && now - gLastInputMs >= (uint32_t)gScrOffMin * 60000UL) { screensOff(); return; }
+  static uint32_t lastCheck = 0;
+  if (now - lastCheck >= 5000) { lastCheck = now; checkExtBacklight(now); }
+}
+
+// --------------------------------------------------------------------------
 #include "zones_ui.h"        // ZONES view + NODES menu
 #include "logs_ui.h"         // LOGS menu, LOG SETUP, HEALTH view
 
@@ -821,9 +913,10 @@ static void changeSens(float d) {
 
 static void serviceKeys() {
   if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return;
+  if (screensWakeKey()) return;                       // this key only woke the screens
   auto st = M5Cardputer.Keyboard.keysState();
-  if (gMenuOpen && st.enter && gMenuCursor == 4) { runNodesMenu(); return; }
-  if (gMenuOpen && st.enter && gMenuCursor == 5) { runLogsMenu(); return; }
+  if (gMenuOpen && st.enter && gMenuCursor == kMenuNodes) { runNodesMenu(); return; }
+  if (gMenuOpen && st.enter && gMenuCursor == kMenuLogs)  { runLogsMenu(); return; }
   for (char c : st.word) {
     if (gMenuOpen) {
       if      (c == ';') gMenuCursor = (gMenuCursor + kMenuItems - 1) % kMenuItems;
@@ -877,6 +970,8 @@ void loop() {
   serviceNodes();
 
   const uint32_t now = millis();
+  serviceScreens(now);
+  if (gScreensOff) return;                            // nothing to draw while the screens are off
   static uint32_t lastBot = 0, lastTop = 0;
   if (now - lastBot >= 33) { lastBot = now; if (gMenuOpen) drawMenu(); else drawBottom(); }
   if (extReady && now - lastTop >= 125) { lastTop = now; drawExternalView(); }

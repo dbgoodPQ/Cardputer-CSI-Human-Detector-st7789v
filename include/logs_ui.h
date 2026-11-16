@@ -214,7 +214,60 @@ static void runClockSet() {
         canvas.drawString(gClockOk ? "Clock is set: correct it if needed" : "Clock NOT set: logging waits", 8, 74);
         canvas.drawString("Kept over restarts, not power-off", 8, 86);
         if (msg && now < msgUntil) uiCenter(msg, 103, uiCol(255, 140, 0));
-        else { canvas.setTextColor(uiCol(80, 80, 88)); canvas.drawString("Time zone: LOG SETUP > TIME ZONE", 8, 103); }
+        else { canvas.setTextColor(uiCol(80, 80, 88)); canvas.drawString("Automatic: LOG SETUP > TIME SERVER", 8, 103); }
+        canvas.pushSprite(0, 0);
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// LOG SETUP > TIME SERVER: IP of an NTP server on the LAN (empty = AUTO, internet)
+// ══════════════════════════════════════════════════════════════════════════════
+static void runTimeServerSet() {
+    char buf[16];
+    strncpy(buf, gHlog.ntp, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    uint32_t lastDraw = 0, msgUntil = 0;
+    const char* msg = nullptr;
+    for (;;) {
+        uiBackground();
+        const int c = uiKey();
+        if (c == '`') return;
+        int l = (int)strlen(buf);
+        if (c == '\b') { if (l > 0) buf[l - 1] = '\0'; }
+        else if (((c >= '0' && c <= '9') || c == '.') && l < 15) { buf[l] = (char)c; buf[l + 1] = '\0'; }
+        else if (c == '\n') {
+            if (!buf[0] || ipv4Ok(buf)) { hlogSetNtp(buf); hlogSaveCfg(); return; }
+            msg = "Not an IP address (e.g. 192.168.1.10)"; msgUntil = millis() + 2500;
+        }
+        const uint32_t now = millis();
+        if (now - lastDraw < 50) { delay(5); continue; }
+        lastDraw = now;
+
+        uiFrame(">> TIME SERVER <<", "0-9 . :type  enter:save  `:back");
+        const int W = canvas.width();
+        const uint16_t cDim = uiCol(138, 138, 138);
+        canvas.setTextColor(cDim);
+        canvas.drawString("IP of the time server on your network", 8, 20);
+        canvas.fillRoundRect(8, 32, W - 16, 22, 3, TFT_BLACK);
+        canvas.drawRoundRect(8, 32, W - 16, 22, 3, gColA);
+        canvas.setTextSize(2);
+        canvas.setTextColor(buf[0] ? TFT_WHITE : uiCol(80, 80, 88));
+        canvas.drawString(buf[0] ? buf : "AUTO", 14, 36);
+        const int cx = 14 + (buf[0] ? canvas.textWidth(buf) : 0) + 1;
+        canvas.setTextSize(1);
+        if ((now / 400) & 1) canvas.fillRect(cx, 36, 2, 15, gColA);
+        canvas.setTextColor(cDim);
+        canvas.drawString("Empty = AUTO (internet time servers)", 8, 62);
+        canvas.drawString("Asked at start, then every hour", 8, 74);
+        char st[24], l3[48];
+        int lvl;
+        hlogNtpStatus(st, sizeof(st), lvl);
+        snprintf(l3, sizeof(l3), "Now: %s %s", gHlog.ntp[0] ? gHlog.ntp : "AUTO", st);
+        if (msg && now < msgUntil) uiCenter(msg, 96, uiCol(255, 140, 0));
+        else {
+            canvas.setTextColor(lvl == 0 ? uiCol(0, 210, 80) : (lvl == 2 ? uiCol(255, 140, 0) : cDim));
+            canvas.drawString(l3, 8, 96);
+        }
         canvas.pushSprite(0, 0);
     }
 }
@@ -222,7 +275,7 @@ static void runClockSet() {
 // ══════════════════════════════════════════════════════════════════════════════
 // LOG SETUP
 // ══════════════════════════════════════════════════════════════════════════════
-static const int kSetupRows = 6;   // CLOCK, LOGGING, SNAPSHOT, KEEP, TIME ZONE, WEB ACCESS
+static const int kSetupRows = 7;   // CLOCK, TIME SERVER, LOGGING, SNAPSHOT, KEEP, TIME ZONE, WEB ACCESS
 
 static void logSetupAdjust(int row, int dir) {
     auto stepIn = [&](const uint8_t* opts, int n, uint8_t cur) -> uint8_t {
@@ -233,21 +286,22 @@ static void logSetupAdjust(int row, int dir) {
     };
     switch (row) {
         case 0: runClockSet(); break;
-        case 1:
+        case 1: runTimeServerSet(); break;
+        case 2:
             if (gHlog.on) hlogSys("logging off");
             gHlog.on = !gHlog.on;
             if (gHlog.on) hlogSys("logging on");
             hlogFlush();
             break;
-        case 2: gHlog.snapMin  = stepIn(kSnapOpts, kNumSnap, gHlog.snapMin); break;
-        case 3: gHlog.keepDays = stepIn(kKeepOpts, kNumKeep, gHlog.keepDays); break;
-        case 4: hlogSetTz((uint8_t)((gHlog.tz + kNumTz + dir) % kNumTz)); break;
-        case 5: gHlog.web = !gHlog.web; break;
+        case 3: gHlog.snapMin  = stepIn(kSnapOpts, kNumSnap, gHlog.snapMin); break;
+        case 4: gHlog.keepDays = stepIn(kKeepOpts, kNumKeep, gHlog.keepDays); break;
+        case 5: hlogSetTz((uint8_t)((gHlog.tz + kNumTz + dir) % kNumTz)); break;
+        case 6: gHlog.web = !gHlog.web; break;
     }
 }
 
 static void runLogSetup() {
-    int cursor = gClockOk ? 1 : 0;           // clock not set: start on CLOCK
+    int cursor = gClockOk ? 2 : 0;           // clock not set: start on CLOCK, else LOGGING
     uint32_t lastDraw = 0;
     const uint8_t keepBefore = gHlog.keepDays;
     for (;;) {
@@ -265,14 +319,14 @@ static void runLogSetup() {
         uiFrame(">> LOG SETUP <<", ";/.:nav  ,//:change  `:save");
         const int W = canvas.width();
         const uint16_t cDim = uiCol(110, 110, 110);
-        const char* labels[kSetupRows] = { "CLOCK", "LOGGING", "SNAPSHOT", "KEEP", "TIME ZONE", "WEB ACCESS" };
+        const char* labels[kSetupRows] = { "CLOCK", "TIME SERVER", "LOGGING", "SNAPSHOT", "KEEP", "TIME ZONE", "WEB ACCESS" };
         for (int i = 0; i < kSetupRows; i++) {
-            const int y = 16 + i * 17;
+            const int y = 15 + i * 15;
             const bool sel = i == cursor;
             canvas.setTextColor(sel ? gColA : uiCol(4, 0, 8));
-            canvas.drawString(">", 4, y + 5);
+            canvas.drawString(">", 4, y + 4);
             canvas.setTextColor(sel ? TFT_WHITE : cDim);
-            canvas.drawString(labels[i], 16, y + 5);
+            canvas.drawString(labels[i], 16, y + 4);
             char v[32];
             uint16_t vc = sel ? gColB : cDim;
             switch (i) {
@@ -287,19 +341,29 @@ static void runLogSetup() {
                         vc = uiCol(255, 140, 0);
                     }
                     break;
-                case 1: snprintf(v, sizeof(v), gHlog.on ? "ON" : "OFF");
+                case 1: {
+                    char st[16];
+                    int lvl;
+                    hlogNtpStatus(st, sizeof(st), lvl);
+                    static const char* const kWord[3] = { "ok", "wait", "FAIL" };   // row is short
+                    snprintf(v, sizeof(v), "%s %s >", gHlog.ntp[0] ? gHlog.ntp : "AUTO", kWord[lvl]);
+                    if (lvl == 0) vc = uiCol(0, 210, 80);
+                    else if (lvl == 2) vc = uiCol(255, 140, 0);
+                    break;
+                }
+                case 2: snprintf(v, sizeof(v), gHlog.on ? "ON" : "OFF");
                         vc = gHlog.on ? uiCol(0, 210, 80) : uiCol(255, 72, 72); break;
-                case 2: snprintf(v, sizeof(v), "every %u min", (unsigned)gHlog.snapMin); break;
-                case 3: snprintf(v, sizeof(v), gHlog.keepDays == 1 ? "%u day" : "%u days", (unsigned)gHlog.keepDays); break;
-                case 4: snprintf(v, sizeof(v), "%s", kTzOpts[gHlog.tz].name); break;
-                case 5: if (gHlog.web) snprintf(v, sizeof(v), "ON  %s", wifiReady ? wifiIP : "no Wi-Fi");
+                case 3: snprintf(v, sizeof(v), "every %u min", (unsigned)gHlog.snapMin); break;
+                case 4: snprintf(v, sizeof(v), gHlog.keepDays == 1 ? "%u day" : "%u days", (unsigned)gHlog.keepDays); break;
+                case 5: snprintf(v, sizeof(v), "%s", kTzOpts[gHlog.tz].name); break;
+                case 6: if (gHlog.web) snprintf(v, sizeof(v), "ON  %s", wifiReady ? wifiIP : "no Wi-Fi");
                         else           snprintf(v, sizeof(v), "OFF");
                         if (!gHlog.web) vc = sel ? uiCol(255, 140, 0) : cDim;
                         break;
             }
             canvas.setTextColor(vc);
             canvas.drawString(v, W - 8 - canvas.textWidth(v), y + 5);
-            if (i < kSetupRows - 1) canvas.drawFastHLine(8, y + 16, W - 16, uiCol(35, 0, 50));
+            if (i < kSetupRows - 1) canvas.drawFastHLine(8, y + 14, W - 16, uiCol(35, 0, 50));
         }
         canvas.pushSprite(0, 0);
     }

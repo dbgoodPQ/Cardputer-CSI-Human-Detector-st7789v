@@ -23,13 +23,15 @@ static void uiBackground() {
     serviceNodes();
     static uint32_t lastTop = 0;
     uint32_t now = millis();
-    if (now - lastTop >= 125) { lastTop = now; drawExternalView(); }
+    serviceScreens(now);
+    if (!gScreensOff && now - lastTop >= 125) { lastTop = now; drawExternalView(); }
 }
 
 // One key press: '\n' enter, '\b' delete, '\t' tab, else the character. 0 = none.
 static int uiKey() {
     M5Cardputer.update();
     if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return 0;
+    if (screensWakeKey()) return 0;                 // this key only woke the screens
     auto st = M5Cardputer.Keyboard.keysState();
     if (st.enter) return '\n';
     if (st.del)   return '\b';

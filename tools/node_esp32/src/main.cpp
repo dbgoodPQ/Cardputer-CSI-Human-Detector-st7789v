@@ -34,6 +34,8 @@
 #include <esp_system.h>
 #include <esp_task_wdt.h>
 #include <esp_attr.h>
+#include "soc/rtc_wdt.h"
+#include "esp32/rom/rtc.h"
 #include "ping/ping_sock.h"
 #include "lwip/ip_addr.h"
 #include "freertos/queue.h"
@@ -59,13 +61,27 @@ static inline int32_t msSince(uint32_t now, uint32_t t) { return (int32_t)(now -
 // ── watchdog + recovery counters ──────────────────────────────────────────────
 // Task watchdog: the run / setup loops subscribe and feed it every pass. If a
 // loop freezes (e.g. blocked inside a network call) the chip reboots in 30 s.
-static const uint32_t kWdtTimeoutS = 30;
+// Backup (issue #5): the RTC watchdog, a separate hardware timer, resets the whole
+// chip if the main task stops feeding it for 60 s, whatever hung (also during the
+// Wi-Fi start-up, and cases where the task watchdog's reset did not recover).
+static const uint32_t kWdtTimeoutS    = 30;
+static const uint32_t kRtcWdtTimeoutMs = 60000;
 
 static void wdtStart() {
+    static bool started = false;
+    if (started) return;
+    started = true;
     esp_task_wdt_init(kWdtTimeoutS, true);   // TWDT already runs (5 s): this updates it
     esp_task_wdt_add(nullptr);               // watch the current (main) task
+    rtc_wdt_protect_off();
+    rtc_wdt_disable();
+    rtc_wdt_set_length_of_reset_signal(RTC_WDT_SYS_RESET_SIG, RTC_WDT_LENGTH_3_2us);
+    rtc_wdt_set_stage(RTC_WDT_STAGE0, RTC_WDT_STAGE_ACTION_RESET_SYSTEM);   // keeps RTC memory (gRtc)
+    rtc_wdt_set_time(RTC_WDT_STAGE0, kRtcWdtTimeoutMs);
+    rtc_wdt_enable();
+    rtc_wdt_protect_on();
 }
-static inline void wdtFeed() { esp_task_wdt_reset(); }
+static inline void wdtFeed() { esp_task_wdt_reset(); rtc_wdt_feed(); }
 
 // Why the firmware restarted itself (kept across soft resets in RTC memory).
 enum : uint8_t { kCauseNone = 0, kCauseLink = 1, kCauseOffline = 2, kCauseHeap = 3, kCauseForget = 4 };
@@ -79,20 +95,33 @@ struct RtcStats {
     uint32_t link;      // link-check rejoins (router stopped answering)
     uint32_t rejoin;    // backup reconnects (Wi-Fi down 30 s)
     uint32_t cause;     // kCause* set just before the firmware restarts itself
+    uint32_t stage;     // nodeproto::STG_* the firmware is in now (issue #5)
 };
-static const uint32_t kRtcMagic = 0xC5100DE2u;
+static const uint32_t kRtcMagic = 0xC5100DE3u;   // E3: stage added
 static RTC_NOINIT_ATTR RtcStats gRtc;
 static uint8_t  gResetReason = 0;   // esp_reset_reason() of this boot
 static uint8_t  gPrevCause   = 0;   // gRtc.cause found at boot (why the last restart)
+static uint8_t  gPrevStage   = 0;   // step the firmware was in when it reset (STG_POWER_UP = blank RTC memory)
+static uint8_t  gRomReset    = 0;   // ROM reset reason of CPU 0 (finer than esp_reset_reason)
+static uint8_t  gChipRev     = 0;   // ESP32 silicon revision (WROOM-32 modules can have rev 0/1)
+
+static inline void stage(uint8_t s) { gRtc.stage = s; }
 
 static void rtcStatsBoot() {
-    if (gRtc.magic != kRtcMagic) { memset(&gRtc, 0, sizeof(gRtc)); gRtc.magic = kRtcMagic; }
+    if (gRtc.magic != kRtcMagic) {
+        memset(&gRtc, 0, sizeof(gRtc)); gRtc.magic = kRtcMagic;
+        gRtc.stage = nodeproto::STG_POWER_UP;
+    }
     const esp_reset_reason_t rr = esp_reset_reason();
     gResetReason = (uint8_t)rr;
+    gRomReset    = (uint8_t)rtc_get_reset_reason(0);
+    gChipRev     = (uint8_t)ESP.getChipRevision();
     gRtc.boots++;
     if (rr == ESP_RST_TASK_WDT || rr == ESP_RST_INT_WDT || rr == ESP_RST_WDT) gRtc.wdt++;
     gPrevCause = (uint8_t)gRtc.cause;
     gRtc.cause = kCauseNone;
+    gPrevStage = (uint8_t)gRtc.stage;
+    stage(nodeproto::STG_BOOT);
 }
 
 // Why this boot happened, short form for the Cardputer (NODES > node, N report
@@ -187,6 +216,7 @@ static void addPeer(const uint8_t* mac) {
 
 static void runSetupMode() {
     Serial.printf("# SETUP MODE: node %s waiting to be paired (Cardputer: ` > NODES > ADD NODE)\n", gMyHex);
+    stage(nodeproto::STG_SETUP);
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     delay(100);
@@ -428,6 +458,7 @@ static void stopPing() {
 }
 
 static void startPing() {
+    stage(nodeproto::STG_PING);
     stopPing();
     IPAddress gw = WiFi.gatewayIP();
     esp_ping_config_t cfg;
@@ -451,6 +482,7 @@ static void startPing() {
 __attribute__((unused)) static void IRAM_ATTR promiscuousRxCb(void*, wifi_promiscuous_pkt_type_t) {}
 
 static void startSensing() {
+    stage(nodeproto::STG_SENSE_ON);
     if (!gCsiQ) gCsiQ = xQueueCreate(32, sizeof(CsiPkt));
     const uint8_t* bssid = WiFi.BSSID();
     gBssidOk = false;
@@ -480,6 +512,7 @@ static void startSensing() {
 }
 
 static void stopSensing() {
+    stage(nodeproto::STG_SENSE_OFF);
     gLogN = 0; gLogPort = 0;
     stopPing();
     esp_wifi_set_csi(false);
@@ -534,6 +567,7 @@ static void handleCommand(char* line, const IPAddress& from) {
 
 static void serviceUdp() {
     if (!gUdpOn) return;
+    stage(nodeproto::STG_UDP_RX);
     for (int i = 0; i < 4; i++) {
         int sz = gUdp.parsePacket();
         if (sz <= 0) return;
@@ -554,6 +588,7 @@ static void serviceUdp() {
 static void serviceSensing(uint32_t now) {
     static uint32_t lastTick = 0, lastRep = 0, rateT0 = 0, rateCnt0 = 0, seq = 0;
 
+    stage(nodeproto::STG_CSI);
     if (gCsiQ) {
         CsiPkt pk;
         int n = 0;
@@ -582,6 +617,7 @@ static void serviceSensing(uint32_t now) {
                          (unsigned long)(now / 1000), (unsigned)gDrops, bootReasonStr());
         if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
         if (n > 0) {
+        stage(nodeproto::STG_REPORT);
         gUdp.beginPacket(IPAddress(255, 255, 255, 255), nodeproto::kReportPort);
         gUdp.write((const uint8_t*)line, n);
         if (gUdp.endPacket()) gSendOkMs = millis();
@@ -593,21 +629,25 @@ static void serviceSensing(uint32_t now) {
 // Cardputer ignores it (it only parses "N," lines). Keep it under 92 bytes: the
 // Cardputer reads datagrams into a 96-byte buffer and WiFiUDP stalls on a longer one.
 //   H,<mac>,<uptime_s>,<reset_reason>,<prev_cause>,<boots>,<wdt>,<link>,<rejoin>,
-//     <free_heap>,<min_heap>,<ping_ok_per_s>,<last_disc_reason>
+//     <free_heap>,<min_heap>,<ping_ok_per_s>,<last_disc_reason>,
+//     <prev_stage>,<rom_reset>,<chip_rev>          (fw 2.6.0-dev7, issue #5)
+// prev_stage = nodeproto::STG_* the firmware was in when it last reset.
 static void sendHealth(uint32_t now) {
     static uint32_t lastH = 0, pingCnt0 = 0;
     if (!gUdpOn || msSince(now, lastH) < 10000) return;
+    stage(nodeproto::STG_HEALTH);
     const uint32_t dt = lastH ? (uint32_t)msSince(now, lastH) : 0;
     const uint32_t cnt = gPingOkCount;
     const unsigned pingHz = dt ? (unsigned)(((cnt - pingCnt0) * 1000UL + dt / 2) / dt) : 0;
     pingCnt0 = cnt;
     lastH = now;
     char line[92];
-    int n = snprintf(line, sizeof(line), "H,%s,%lu,%u,%u,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u\n",
+    int n = snprintf(line, sizeof(line), "H,%s,%lu,%u,%u,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u,%u,%u,%u\n",
                      gMyHex, (unsigned long)(now / 1000), (unsigned)gResetReason, (unsigned)gPrevCause,
                      (unsigned long)gRtc.boots, (unsigned long)gRtc.wdt, (unsigned long)gRtc.link,
                      (unsigned long)gRtc.rejoin, (unsigned long)ESP.getFreeHeap(),
-                     (unsigned long)ESP.getMinFreeHeap(), pingHz, (unsigned)gLastDiscReason);
+                     (unsigned long)ESP.getMinFreeHeap(), pingHz, (unsigned)gLastDiscReason,
+                     (unsigned)gPrevStage, (unsigned)gRomReset, (unsigned)gChipRev);
     if (n <= 0) return;
     if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
     gUdp.beginPacket(IPAddress(255, 255, 255, 255), nodeproto::kReportPort);
@@ -637,6 +677,7 @@ static void wifiBegin(uint32_t now) {
 }
 
 static void wifiRejoin(uint32_t now, const char* why) {
+    stage(nodeproto::STG_REJOIN);
     Serial.printf("# rejoining Wi-Fi: %s\n", why);
     WiFi.disconnect();
     wifiBegin(now);
@@ -705,12 +746,13 @@ static void runRunMode(const char* ssid, const char* pass, bool fresh) {
     WiFi.setAutoReconnect(true);
     WiFi.onEvent(onWifiDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
     const uint32_t t0 = millis();
+    stage(nodeproto::STG_WIFI_BEGIN);
     wifiBegin(t0);
     gLastHealthyMs = t0;
-    wdtStart();
     bool everConnected = false;
     for (;;) {
         wdtFeed();
+        stage(nodeproto::STG_LOOP);
         const uint32_t now = millis();
         checkBootButton();
         const bool up = WiFi.status() == WL_CONNECTED;
@@ -741,6 +783,7 @@ static void runRunMode(const char* ssid, const char* pass, bool fresh) {
         if (gBlinkUntil && (int32_t)(gBlinkUntil - now) > 0) ledSet((now / 100) & 1);
         else if (!up)                                         ledSet(((now / 1000) % 4) == 0);
         else                                                  ledSet(((now % 5000) < 60) ? !gPresent : gPresent);
+        stage(nodeproto::STG_IDLE);
         delay(2);
     }
 }
@@ -748,15 +791,18 @@ static void runRunMode(const char* ssid, const char* pass, bool fresh) {
 void setup() {
     Serial.begin(115200);
     rtcStatsBoot();
+    wdtStart();                     // both watchdogs from the start: Wi-Fi start-up can hang too
     pinMode(NODE_LED_PIN, OUTPUT);
     pinMode(BOOT_PIN, INPUT_PULLUP);
     ledSet(false);
+    stage(nodeproto::STG_WIFI_INIT);
     WiFi.mode(WIFI_STA);
     WiFi.macAddress(gMyMac);
     nodeproto::macHex(gMyMac, gMyHex);
-    Serial.printf("\n# CSI node fw %s  id NODE %02X%02X  mac %s\n", kFwVer, gMyMac[4], gMyMac[5], gMyHex);
-    Serial.printf("# boot %lu: reset reason %u, last self-restart cause %u, watchdog resets %lu\n",
-                  (unsigned long)gRtc.boots, (unsigned)gResetReason, (unsigned)gPrevCause, (unsigned long)gRtc.wdt);
+    Serial.printf("\n# CSI node fw %s  id NODE %02X%02X  mac %s  chip rev %u\n", kFwVer, gMyMac[4], gMyMac[5], gMyHex, (unsigned)gChipRev);
+    Serial.printf("# boot %lu: reset reason %u (rom %u) during %s, last self-restart cause %u, watchdog resets %lu\n",
+                  (unsigned long)gRtc.boots, (unsigned)gResetReason, (unsigned)gRomReset,
+                  nodeproto::stageName(gPrevStage), (unsigned)gPrevCause, (unsigned long)gRtc.wdt);
 
     Preferences p;
     p.begin("csinode", true);

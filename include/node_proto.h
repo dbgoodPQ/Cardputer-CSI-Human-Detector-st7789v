@@ -34,6 +34,23 @@ static const uint8_t  kVer        = 1;
 
 enum : uint8_t { HELLO = 1, SEEN = 2, PAIR = 3, PAIR_OK = 4 };
 
+// Where the node firmware was when it last reset (issue #5). The node keeps the
+// current step in RTC memory; after a reset it sends the step it was in on its
+// health line (H field 14) and the Cardputer logs it, e.g. "WDT during REPORT".
+enum : uint8_t {
+    STG_NONE = 0, STG_BOOT, STG_WIFI_INIT, STG_SETUP, STG_WIFI_BEGIN, STG_LOOP, STG_SENSE_ON,
+    STG_PING, STG_SENSE_OFF, STG_UDP_RX, STG_CSI, STG_REPORT, STG_HEALTH, STG_REJOIN, STG_IDLE,
+    STG_COUNT,
+    STG_POWER_UP = 255      // RTC memory was blank: first boot after power-up
+};
+static inline const char* stageName(uint8_t s) {
+    static const char* const k[STG_COUNT] = {
+        "-", "BOOT", "WIFI INIT", "SETUP MODE", "WIFI BEGIN", "LOOP", "SENSING ON",
+        "PING START", "SENSING OFF", "UDP RX", "CSI", "REPORT", "HEALTH", "REJOIN", "IDLE" };
+    if (s == STG_POWER_UP) return "POWER-UP";
+    return s < STG_COUNT ? k[s] : "?";
+}
+
 struct __attribute__((packed)) Hdr {
     char    magic[4];   // "CSIN"
     uint8_t type;

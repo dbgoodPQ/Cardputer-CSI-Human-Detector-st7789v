@@ -171,6 +171,10 @@ static bool idxPush(uint32_t*& arr, uint32_t& n, uint32_t& cap, uint32_t v) {
     return true;
 }
 
+// Read buffers, allocated only while the viewer is open (no PSRAM on the StampS3).
+static const size_t kViewBufLen = 4096;      // 16 + 13 lines of up to ~110 bytes
+static char*        gViewBuf    = nullptr;
+
 static void idxFree(LogIdx& x) {
     free(x.sparse); free(x.ev);
     x.sparse = x.ev = nullptr;
@@ -184,12 +188,14 @@ static void idxScan(LogIdx& x) {
     const uint32_t size = f.size();
     if (size <= x.endOff) { f.close(); return; }
     f.seek(x.endOff);
-    static uint8_t buf[512];
+    if (!gViewBuf) { f.close(); return; }
+    uint8_t* buf = (uint8_t*)gViewBuf;
+    const size_t bufLen = 512;
     char head[40];
     int  hl = 0;
     uint32_t off = x.endOff, lineStart = x.endOff;
     while (off < size) {
-        const int n = f.read(buf, size - off < sizeof(buf) ? size - off : sizeof(buf));
+        const int n = f.read(buf, size - off < bufLen ? size - off : bufLen);
         if (n <= 0) break;
         for (int k = 0; k < n; k++) {
             const char c = (char)buf[k];
@@ -237,11 +243,12 @@ static int idxReadAll(const LogIdx& x, uint32_t first, ViewLine* out, int count)
     if (first >= x.lines || !x.sparseN) return 0;
     const uint32_t blk = first / 16;
     if (blk >= x.sparseN) return 0;
+    if (!gViewBuf) return 0;
     File f = SD.open(x.path, FILE_READ);
     if (!f) return 0;
     f.seek(x.sparse[blk]);
-    static char buf[4096];   // 16 + 13 lines of up to ~110 bytes
-    const int n = f.read((uint8_t*)buf, sizeof(buf) - 1);
+    char* buf = gViewBuf;
+    const int n = f.read((uint8_t*)buf, kViewBufLen - 1);
     f.close();
     if (n <= 0) return 0;
     buf[n] = '\0';
@@ -408,6 +415,8 @@ static void runLogViewer(const char* dayName) {
     snprintf(x.path, sizeof(x.path), "%s/%s", kLogDir, dayName);
     const bool live = ymdFromName(dayName) == gDayYmd;
     if (live) hlogFlush();
+    gViewBuf = (char*)malloc(kViewBufLen);
+    if (!gViewBuf) { runConfirm(">> VIEWING LOG <<", "Not enough memory", "close other screens", "`:back"); return; }
 
     // indexing a full day takes a moment: say so
     uiFrame(">> VIEWING LOG <<", "");
@@ -458,6 +467,8 @@ static void runLogViewer(const char* dayName) {
     }
     gExtOwned = false;
     idxFree(x);
+    free(gViewBuf);
+    gViewBuf = nullptr;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

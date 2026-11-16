@@ -30,6 +30,9 @@
 #ifndef EXT_TFT_SCK
 #define EXT_TFT_SCK  40
 #endif
+#ifndef EXT_SD_MISO
+#define EXT_SD_MISO  39          // microSD data-out, shares SCK/MOSI with this panel
+#endif
 // Landscape (320x240). 1 matches the Cardputer's built-in screen; use 3 to turn the picture 180°.
 #ifndef EXT_ROTATION
 #define EXT_ROTATION 1
@@ -46,12 +49,17 @@ public:
             cfg.spi_mode    = 0;
             cfg.freq_write  = 27000000;
             cfg.freq_read   = 16000000;
-            cfg.spi_3wire   = true;
+            cfg.spi_3wire   = false;         // write-only panel (no MISO); 3-wire mode would
+                                             // leave MOSI half-duplex and break SD card reads
             cfg.use_lock    = true;
             cfg.dma_channel = 0;
             cfg.pin_sclk    = EXT_TFT_SCK;
             cfg.pin_mosi    = EXT_TFT_MOSI;
-            cfg.pin_miso    = -1;
+            // MISO = the microSD card's data-out (G39). The panel never reads, but LGFX
+            // runs SPI.end() + SPI.begin(sclk, miso, mosi) on this host at init, and
+            // Arduino's SPI.begin() is a no-op once begun: with -1 here the SD card
+            // (health_log.h) never gets its MISO and SD.begin() fails ("NO SD").
+            cfg.pin_miso    = EXT_SD_MISO;
             cfg.pin_dc      = EXT_TFT_DC;
             _bus_instance.config(cfg);
             _panel_instance.setBus(&_bus_instance);

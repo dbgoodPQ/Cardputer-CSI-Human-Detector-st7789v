@@ -37,13 +37,17 @@ room by room. Realistic target: **presence + motion** per room.
       LD2410 later: dots on the centre line at the measured distance.
     - **ZONES** (`drawZones()`, include/zones_ui.h): one row per node, adaptive
       row height for up to 6.
+    - **HEALTH** (`drawHealth()`, include/logs_ui.h, fw 2.6): per node online % today
+      (`hlogAvail100`), uptime, drops/boots today, 24 h bar of 15-min slots
+      (green ok, red was offline), last event. `gViewMode` 0 cone, 1 zones, 2 health.
   - Bottom = built-in 1.14" (240x135): Wi-Fi IP, nodes pill (`nodesTag()`:
     `2/3 ON`, green/orange/red), banner (toast 2 s > NO WIFI > NO NODES >
     `>> ZONE <<` > CLEAR), zone chips, strongest-zone graph (0.5 line = cut-off),
     cut-off + key hints.
 - Keys: `,` `/` sensitivity = v2 smoothness cut-off `gSens` (0.30-0.60, step 0.02,
   default 0.42, prefs "sens", sent as `C,SENS` on change + every 5 s), `n`,
-  `.`, `` ` `` menu (PALETTE, SCREEN, EXT PANEL, WIFI NET, NODES; version top-right).
+  `.`, `` ` `` menu (PALETTE, SCREEN, EXT PANEL, WIFI NET, NODES, LOGS; version top-right;
+  6 rows of 17 px, `kMenuItems`).
   No `c`/`x`/`r`: v2 needs no calibration, cone scale is fixed in %.
 - Display hold: v2 nodes report raw contact; `getZone()` keeps a zone present
   for `kDisplayHoldMs` (10 s) after its last reported motion (`ZoneView.held` =
@@ -104,6 +108,34 @@ room by room. Realistic target: **presence + motion** per room.
 - CI builds `csi-node-esp32.bin` (merged: 0x1000 bootloader, 0x8000 partitions,
   0xe000 boot_app0, 0x10000 app; flash at 0x0).
 
+## Node health log (Cardputer, fw 2.6, `include/health_log.h`)
+- microSD on the shared SPI2 bus: SCK40 MISO39 MOSI14 CS12, `SPI.begin` + `SD.begin(12, SPI, 20 MHz)`
+  after `extPanel.init()` (`hlogBegin()` in setup). `ext_panel.h` has `spi_3wire = false` for this
+  (3-wire leaves MOSI half-duplex) and `pin_miso = 39` (see Hard constraints). Not yet confirmed on hardware. No card: retry every 30 s.
+- Files: `/CSIRADAR/logs/YYYY-MM-DD.csv` (header `time,node,id,event,detail`, local time,
+  commas in detail -> `;`), `/CSIRADAR/state.bin` (today's per-node counters + 96 15-min slots,
+  keyed by MAC, saved every 60 s; restored at clock set if same day), `/CSIRADAR/summary.csv`
+  (`date,offline,boots,drops` per closed day; LOGS list + web page).
+- Events from hooks in zones_core.h: `hlogOnReport()` after each N report (ONLINE first/back,
+  BOOT when uptime goes down, DROP when drops go up, gap = outage), `hlogOnHealthLine()` for H lines
+  (heap, ping/s), `hlogService()` every second from `serviceNodes()` (OFFLINE after 10 s silence,
+  not while the Cardputer's own Wi-Fi is down or < 15 s after it came back; online seconds; HEALTH
+  snapshot every `snapMin` on the clock; flush every 10 s or 3.5 KB; state every 60 s; day roll).
+- Clock: no RTC. User's home network has NO internet, so NTP (`configTzTime`, still tried) never
+  answers there: the clock is set by hand in LOG SETUP > CLOCK (`runClockSet`, `hlogSetClock` ->
+  settimeofday, SYS "clock set (by hand)"). System time survives software restarts (RTC timer;
+  "clock set (kept over restart)"), not power-off. Last known time in prefs "hlog"/"last" every
+  10 min pre-fills the CLOCK screen. Bottom screen shows "set clock: ..." after 30 s without a
+  clock; settings LOGS row says NO CLOCK. Lines before the clock is set wait in `gPend[24]` and
+  get their real time at clock set. Time zones = POSIX strings in `kTzOpts`.
+- Settings prefs "hlog": last (epoch), on, snap (1/5/10/15/30 min), keep (1/3/5/7/14/30 days, default 5,
+  today counts), tz (default New York), web. Keys in LOG SETUP: `,` `/` change.
+- LOGS menu (`runLogsMenu`, logs_ui.h): day list only (date, summary, size; `;` `.` scroll,
+  `s` LOG SETUP). No on-device viewer: removed in 2.6.0-dev2 at the user's request (RAM:
+  indexing a day file needs ~15-20 KB, no PSRAM). Files are read via the web page.
+- Web (`include/web_logs.h`, WebServer port 80, `handleClient()` from `serviceNodes()`): `/`,
+  `/logs.json`, `/logs/<day>.csv` (`?view=1` inline). Name checked with `ymdFromName()`.
+
 ## Build / run
 - `pio run -e cardputer-radar-csi -t upload` — Cardputer console (name kept from
   v1; only build). CI output `cardputer-csi-st7789v.bin`, flash at 0x0.
@@ -127,6 +159,10 @@ room by room. Realistic target: **presence + motion** per room.
   no offsets), rotation `EXT_ROTATION` (1), CS5/RST3/DC6/MOSI14/SCK40, BL=GPIO4 (PWM,
   `Light_PWM` ch 3), SPI2_HOST **shared with SD** (`bus_shared=true`),
   `rgb_order=false`, 27 MHz.
+- SD card on the panel's bus: M5GFX `spi::init` does `SPI.end(); SPI.begin(sclk, miso, mosi)`
+  for SPI2_HOST, and Arduino `SPI.begin()` is a no-op once begun, so the panel config must
+  carry the SD MISO (`pin_miso = EXT_SD_MISO` = 39). With -1 the card never answers
+  (fw 2.6.0-dev1/dev2 showed NO SD with a working card).
 - Display libs: **M5Unified + M5Cardputer (M5GFX/LovyanGFX)**, Arduino framework,
   platform espressif32@6.12.0, board m5stack-stamps3.
 
@@ -141,6 +177,9 @@ room by room. Realistic target: **presence + motion** per room.
 - `include/zones_core.h` — nodes storage, UDP reports/commands, zones, pairing
   plumbing, cone selection, chips, `nodesTag()`.
 - `include/zones_ui.h` — ZONES view, NODES menu, add-node flow.
+- `include/health_log.h` — node health log: SD, clock, events, day files, state, summary.
+- `include/logs_ui.h` — LOGS menu (day list), LOG SETUP, HEALTH view.
+- `include/web_logs.h` — log web page / downloads (port 80).
 - `tools/node_esp32/` — node firmware (PlatformIO, esp32dev).
 - `tools/csi_lab/` — PC tools (Python 3.10+, numpy, matplotlib): record.py
   (raw CSI from a node), replay.py (score v1/v2, --hold/--chain/--gate, plots),
@@ -150,6 +189,9 @@ room by room. Realistic target: **presence + motion** per room.
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
 
 ## Status (v2)
+🧪 fw 2.6.0-dev4 (branch `sd-logs`; dev4 = manual CLOCK for the no-internet network, dev3 = SD MISO fix, dev2 showed NO SD, Cardputer only): node health log on SD, LOGS list,
+HEALTH view, web download (2.6.0-dev1 also had an on-device log viewer, removed). Not yet tested on hardware (SD on the shared bus is the
+main risk). Design canvas "Cardputer Node Health Log Screens".
 🧪 fw 2.5.0-dev2 (main, merged from branches `v2.5` + `node-reliability` on 2026-11-15): node
 self-recovery from node-reliability + Cardputer cone in %, node diagnostics, no `r` key from v2.5, WiFiUDP
 flush fixes. Not yet tested on hardware. README previews in docs/screens re-rendered for 2.5
@@ -184,15 +226,22 @@ back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
    (release tag v2.1.0-dev1), checks versions, records a 60 min empty (3 nodes in
    parallel, --port 4213/4214/4215), a walk per node (v2 parity on hardware) and
    "next room" per room; optionally --rate 100.
-2. **Node uptime soak** (fw 2.5.0-dev2): flash all nodes, run
-   `python health.py --nodes 3 --csv health.csv` for 7 days, then the router
-   reboot / router off tests. Flash the Cardputer with 2.5.0-dev2 too (WiFiUDP
-   flush fix in `serviceNodes()`).
-3. **Signed reports and commands** (roadmap phase 5).
-4. **Presence event log** on the bottom screen with optional SD persistence.
-5. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)
+2. **Node uptime soak**: nodes on 2.5.0-dev2, Cardputer on 2.6.0-dev4 with an SD card and the clock set;
+   7 days, read online % in the HEALTH view (day files via the web page; health.py
+   still works), then the router reboot / router off tests.
+3. **Clock from a local time server (later, user asked to keep it as a note):** the home
+   network has no internet, so add a LOG SETUP > TIME SERVER row (IP typed, or AUTO =
+   internet pools) and query it at start + hourly (`configTzTime(tz, ip)`); keep the manual
+   CLOCK as the fallback. Candidate servers on the LAN: Windows (W32Time server, off by
+   default), Linux / Raspberry Pi (chrony `allow 192.168.0.0/16`), a NAS (NTP service
+   checkbox). The Linksys E3000 can't serve time without internet. Other options weighed:
+   web page sets the clock from the visitor's browser time (option B), M5Stack Unit RTC
+   (HYM8563, I2C 0x51) on Grove, but Grove is reserved for the LD2410.
+4. **Signed reports and commands** (roadmap phase 5).
+5. **Presence event log** on the bottom screen with optional SD persistence.
+6. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)
    for still people + distance; dots in the range cone (design agreed).
-6. **ESP32-C5 nodes** (MonsterC5) later: different `wifi_csi_acquire_config_t`.
+7. **ESP32-C5 nodes** (MonsterC5) later: different `wifi_csi_acquire_config_t`.
 
 ## Hardware inventory (chip cheat-sheet)
 - C5 (best CSI): MonsterC5, AWOK Dual Touch (2x each), Marauder v8.

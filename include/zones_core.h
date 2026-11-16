@@ -51,6 +51,10 @@ static float    gZoneHist[kZoneHist];
 static int      gZoneHistHead = 0;
 
 static void runNodesMenu();      // zones_ui.h
+static void hlogOnReport(int i, uint32_t prevMs, uint32_t now);   // health_log.h
+static void hlogOnHealthLine(char* line, uint32_t now);           // health_log.h
+static void hlogService(uint32_t now);                            // health_log.h
+static void webService();                                         // web_logs.h
 
 // ── storage ──────────────────────────────────────────────────────────────────
 static void loadNodes() {
@@ -149,6 +153,7 @@ static void parseNodeReport(char* line, uint32_t now) {
     int i = findNodeHex(f[1]);
     if (i < 0) return;                    // not paired with this Cardputer
     NodeLive& L = gLive[i];
+    const uint32_t prevMs = L.lastMs;
     L.lastMs   = now;
     L.presence = atoi(f[3]) != 0;
     float m = atof(f[4]);
@@ -169,6 +174,7 @@ static void parseNodeReport(char* line, uint32_t now) {
         while (e > L.boot && (e[-1] == '\n' || e[-1] == '\r')) *--e = '\0';
     }
     if (L.presence) { L.lastMotionMs = now; L.lastPresMotion = L.motion; }
+    hlogOnReport(i, prevMs, now);
 }
 
 static bool nodeOnline(int i, uint32_t now) {
@@ -270,7 +276,8 @@ static void serviceNodes() {
             if (n <= 0) continue;
             buf[n] = '\0';
             while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
-            parseNodeReport(buf, now);
+            if (strncmp(buf, "H,", 2) == 0) hlogOnHealthLine(buf, now);   // node health, every 10 s
+            else                            parseNodeReport(buf, now);
         }
         static uint32_t lastSens = 0;
         if (now - lastSens >= 5000) { lastSens = now; sendNodeSens(); }   // nodes that rebooted
@@ -283,6 +290,8 @@ static void serviceNodes() {
         gZoneHist[gZoneHistHead] = m;
         gZoneHistHead = (gZoneHistHead + 1) % kZoneHist;
     }
+    hlogService(now);     // node health log (SD card)
+    webService();         // log download page
 }
 
 // ── ESP-NOW pairing plumbing ─────────────────────────────────────────────────

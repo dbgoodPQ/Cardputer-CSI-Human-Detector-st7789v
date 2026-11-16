@@ -3,4 +3,4 @@
 // nodes report it to the Cardputer (10th field of the N report).
 // Bump it with every firmware change you want to flash.
 #pragma once
-#define FW_VERSION "2.6.0-dev6"
+#define FW_VERSION "2.6.0-dev7"

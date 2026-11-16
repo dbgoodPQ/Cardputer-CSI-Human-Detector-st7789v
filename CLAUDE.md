@@ -107,9 +107,17 @@ room by room. Realistic target: **presence + motion** per room.
   30 s while down (Arduino auto-reconnect stays on); no healthy link 5 min ->
   restart; free heap < 20 KB for 10 s -> restart. Counters in RTC_NOINIT `gRtc`
   (boots, wdt, link, rejoin, cause). Health line every 10 s on UDP 4211:
-  `H,<mac>,<uptime_s>,<reset_reason>,<prev_cause>,<boots>,<wdt>,<link>,<rejoin>,<heap>,<min_heap>,<ping_hz>,<disc>`
-  (Cardputer ignores it; keep < 92 B). `tools/csi_lab/health.py` logs it and
-  measures availability.
+  `H,<mac>,<uptime_s>,<reset_reason>,<prev_cause>,<boots>,<wdt>,<link>,<rejoin>,<heap>,<min_heap>,<ping_hz>,<disc>,<prev_stage>,<rom_reset>,<chip_rev>`
+  (keep < 92 B, worst case 80). `tools/csi_lab/health.py` logs it and measures availability
+  (ignores the last 3 fields).
+- Issue #5 (fw 2.6.0-dev7): RTC watchdog 60 s (`rtc_wdt_*`, action RESET_SYSTEM so RTC memory
+  survives) on top of the 30 s task watchdog, both started first thing in `setup()` (`wdtStart()`,
+  idempotent). `stage(STG_*)` writes the current step into `gRtc.stage` (enum + `stageName()` in
+  node_proto.h); at boot it becomes `gPrevStage` (STG_POWER_UP = blank RTC memory). Cardputer
+  `hlogOnHealthLine()` logs `INFO chip rev R boots B wdt W` once per node per Cardputer start and
+  `RESET <reason> in <stage> rom<N> <name> rev<R>` after a crash-type boot (PANIC/WDTs/BOD).
+  The problem node is the only WROOM-32 (others WROOM-32D): older silicon (rev 0/1) has errata,
+  e.g. a spurious watchdog reset at power-up on rev 0.
 - WiFiUDP (Arduino-ESP32 2.0.17) keeps unread bytes of a datagram and then
   `parsePacket()` returns 0 forever: always `flush()` after `read()`. The
   Cardputer (`serviceNodes()`) and nodes (`serviceUdp()`) both flush since fw
@@ -207,8 +215,8 @@ room by room. Realistic target: **presence + motion** per room.
   startup task, replaces W32Time; Linux: chrony config or bundled Python server). For next step 3.
 
 ## Status (v2)
-🧪 fw 2.6.0-dev6 (branch `fix-issues-5-6-7`, Cardputer: external backlight check + SCREEN OFF
-for issue #6; dev5 = LOG SETUP > TIME SERVER for issue #7).
+🧪 fw 2.6.0-dev7 (branch `fix-issues-5-6-7`): nodes RTC watchdog + reset step, Cardputer logs
+RESET/INFO (issue #5); dev6 = external backlight check + SCREEN OFF (#6); dev5 = TIME SERVER (#7).
 🧪 fw 2.6.0-dev4 (branch `sd-logs`; dev4 = manual CLOCK for the no-internet network, dev3 = SD MISO fix, dev2 showed NO SD, Cardputer only): node health log on SD, LOGS list,
 HEALTH view, web download (2.6.0-dev1 also had an on-device log viewer, removed). Not yet tested on hardware (SD on the shared bus is the
 main risk). Design canvas "Cardputer Node Health Log Screens".
@@ -252,7 +260,8 @@ back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
 3. **GitHub issues (branch `fix-issues-5-6-7`):** #7 clock from a LAN time server (done in
    fw 2.6.0-dev5, not yet tested on hardware), #6 external screen black + backlight off until
    reboot, bottom screen fine (fw 2.6.0-dev6: backlight check + screen-off timer; check the day
-   log for "ext backlight lost"; if it goes dark with no such line, suspect wiring/power), #5 one node (WROOM-32, red power LED + purple GPIO2 LED) goes offline
+   log for "ext backlight lost"; if it goes dark with no such line, suspect wiring/power), #5
+   (fw 2.6.0-dev7: RTC watchdog + reset step in the log; read the RESET/INFO lines next time), #5 one node (WROOM-32, red power LED + purple GPIO2 LED) goes offline
    after ~30 min with the heartbeat stopped; log shows BOOT + WDT only after a power cycle.
 4. **Signed reports and commands** (roadmap phase 5).
 5. **Presence event log** on the bottom screen with optional SD persistence.

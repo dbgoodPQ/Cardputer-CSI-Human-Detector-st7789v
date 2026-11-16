@@ -145,6 +145,9 @@ struct NodeHealth {
     bool     seen, online, haveDiag;
     uint32_t lastUpS;
     uint16_t lastDrops;
+    // reset details from the health line (fw 2.6.0-dev7+, issue #5)
+    bool     hInfo;                        // INFO line logged since the Cardputer started
+    uint32_t hBoots, hUpS;                 // boots / uptime of the last health line
     // last health line (fw 2.1.0-dev2+)
     bool     hasH;
     uint32_t heap, minHeap;
@@ -517,13 +520,33 @@ static void hlogOnReport(int i, uint32_t prevMs, uint32_t now) {
     h->lastDrops = L.drops;
 }
 
+// Node reset reason (esp_reset_reason_t number), finer than resetCode().
+static const char* nodeResetName(int rr) {
+    switch (rr) {
+        case 1: return "PWR";    case 2: return "EXT";     case 3: return "SW";
+        case 4: return "PANIC";  case 5: return "INT WDT"; case 6: return "TASK WDT";
+        case 7: return "WDT";    case 9: return "BOD";     default: return "?";
+    }
+}
+// Classic ESP32 ROM reset reason (rtc_get_reset_reason), short.
+static const char* romResetName(int r) {
+    switch (r) {
+        case 1: return "PWR";     case 3: return "SW";      case 4: return "OWDT";
+        case 5: return "DSLP";    case 7: return "TG0WDT";  case 8: return "TG1WDT";
+        case 9: return "RTCWDT";  case 11: return "TGWDTC"; case 12: return "SWCPU";
+        case 13: return "RTCWDTC"; case 14: return "EXTCPU"; case 15: return "BROWNOUT";
+        case 16: return "RTCWDTR"; default: return "?";
+    }
+}
+
 // "H,<mac>,<uptime_s>,<reset_reason>,<prev_cause>,<boots>,<wdt>,<link>,<rejoin>,<heap>,<min_heap>,<ping_hz>,<disc>"
+// fw 2.6.0-dev7+ adds ",<prev_stage>,<rom_reset>,<chip_rev>" (issue #5).
 static void hlogOnHealthLine(char* line, uint32_t now) {
     (void)now;
-    char* f[13];
+    char* f[16];
     int nf = 0;
     char* save = nullptr;
-    for (char* t = strtok_r(line, ",", &save); t && nf < 13; t = strtok_r(nullptr, ",", &save)) f[nf++] = t;
+    for (char* t = strtok_r(line, ",", &save); t && nf < 16; t = strtok_r(nullptr, ",", &save)) f[nf++] = t;
     if (nf < 13) return;
     const int i = findNodeHex(f[1]);
     NodeHealth* h = nhFor(i);
@@ -533,6 +556,22 @@ static void hlogOnHealthLine(char* line, uint32_t now) {
     h->minHeap = strtoul(f[10], nullptr, 10);
     h->pingHz  = (uint16_t)atoi(f[11]);
     h->disc    = (uint8_t)atoi(f[12]);
+    if (nf < 16) return;
+
+    const uint32_t upS = strtoul(f[2], nullptr, 10), boots = strtoul(f[5], nullptr, 10);
+    const int rr = atoi(f[3]), stg = atoi(f[13]), rom = atoi(f[14]), rev = atoi(f[15]);
+    if (!h->hInfo) {                                   // once per node per Cardputer start
+        h->hInfo = true;
+        hlogNode(i, "INFO", "chip rev %d boots %lu wdt %lu", rev, (unsigned long)boots, strtoul(f[6], nullptr, 10));
+    }
+    // A new boot: boots counter or uptime changed back (or first line, fresh boot).
+    const bool newBoot = h->hBoots ? (boots != h->hBoots || upS < h->hUpS) : upS < 120;
+    const bool crash = rr == 4 || rr == 5 || rr == 6 || rr == 7 || rr == 9;
+    if (newBoot && crash)
+        hlogNode(i, "RESET", "%s in %s rom%d %s rev%d", nodeResetName(rr), nodeproto::stageName((uint8_t)stg),
+                 rom, romResetName(rom), rev);
+    h->hBoots = boots;
+    h->hUpS   = upS;
 }
 
 // ── clock ────────────────────────────────────────────────────────────────────

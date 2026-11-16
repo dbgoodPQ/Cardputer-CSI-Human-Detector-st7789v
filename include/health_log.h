@@ -215,6 +215,9 @@ static void clockHHMM(char* out, size_t n) {
 
 // ── SD card ──────────────────────────────────────────────────────────────────
 static bool hlogMount() {
+    // The external panel (ext_panel.h) has already begun this SPI bus with MISO = G39;
+    // this begin() is then a no-op. Keep EXT_SD_MISO in ext_panel.h, or the card
+    // never answers.
     SPI.begin(kSdSck, kSdMiso, kSdMosi, kSdCs);
     if (!SD.begin(kSdCs, SPI, 20000000)) { SD.end(); gSdOk = false; return false; }
     if (SD.cardType() == CARD_NONE)      { SD.end(); gSdOk = false; return false; }

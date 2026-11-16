@@ -111,7 +111,7 @@ room by room. Realistic target: **presence + motion** per room.
 ## Node health log (Cardputer, fw 2.6, `include/health_log.h`)
 - microSD on the shared SPI2 bus: SCK40 MISO39 MOSI14 CS12, `SPI.begin` + `SD.begin(12, SPI, 20 MHz)`
   after `extPanel.init()` (`hlogBegin()` in setup). `ext_panel.h` has `spi_3wire = false` for this
-  (3-wire leaves MOSI half-duplex). Not yet confirmed on hardware. No card: retry every 30 s.
+  (3-wire leaves MOSI half-duplex) and `pin_miso = 39` (see Hard constraints). Not yet confirmed on hardware. No card: retry every 30 s.
 - Files: `/CSIRADAR/logs/YYYY-MM-DD.csv` (header `time,node,id,event,detail`, local time,
   commas in detail -> `;`), `/CSIRADAR/state.bin` (today's per-node counters + 96 15-min slots,
   keyed by MAC, saved every 60 s; restored at clock set if same day), `/CSIRADAR/summary.csv`
@@ -154,6 +154,10 @@ room by room. Realistic target: **presence + motion** per room.
   no offsets), rotation `EXT_ROTATION` (1), CS5/RST3/DC6/MOSI14/SCK40, BL=GPIO4 (PWM,
   `Light_PWM` ch 3), SPI2_HOST **shared with SD** (`bus_shared=true`),
   `rgb_order=false`, 27 MHz.
+- SD card on the panel's bus: M5GFX `spi::init` does `SPI.end(); SPI.begin(sclk, miso, mosi)`
+  for SPI2_HOST, and Arduino `SPI.begin()` is a no-op once begun, so the panel config must
+  carry the SD MISO (`pin_miso = EXT_SD_MISO` = 39). With -1 the card never answers
+  (fw 2.6.0-dev1/dev2 showed NO SD with a working card).
 - Display libs: **M5Unified + M5Cardputer (M5GFX/LovyanGFX)**, Arduino framework,
   platform espressif32@6.12.0, board m5stack-stamps3.
 
@@ -180,7 +184,7 @@ room by room. Realistic target: **presence + motion** per room.
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
 
 ## Status (v2)
-🧪 fw 2.6.0-dev2 (branch `sd-logs`, Cardputer only): node health log on SD, LOGS list,
+🧪 fw 2.6.0-dev3 (branch `sd-logs`; dev3 = SD MISO fix, dev2 showed NO SD, Cardputer only): node health log on SD, LOGS list,
 HEALTH view, web download (2.6.0-dev1 also had an on-device log viewer, removed). Not yet tested on hardware (SD on the shared bus is the
 main risk). Design canvas "Cardputer Node Health Log Screens".
 🧪 fw 2.5.0-dev2 (main, merged from branches `v2.5` + `node-reliability` on 2026-11-15): node

@@ -135,7 +135,7 @@ static void drawHealth() {
     uint16_t fcol = gColB;
     if (!gSdOk)              { snprintf(foot, sizeof(foot), "NO SD: not logging"); fcol = cBad; }
     else if (!gHlog.on)      { snprintf(foot, sizeof(foot), "logging OFF"); fcol = cWarn; }
-    else if (!gClockOk)      { snprintf(foot, sizeof(foot), "waiting for clock"); fcol = cWarn; }
+    else if (!gClockOk)      { snprintf(foot, sizeof(foot), "clock NOT set: no log"); fcol = cWarn; }
     else                     snprintf(foot, sizeof(foot), "log %.10s", gDayName);
     topCanvas.setTextColor(fcol);
     topCanvas.drawString(foot, 4, H - 10);
@@ -149,8 +149,81 @@ static void drawHealth() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// LOG SETUP > CLOCK: set the date and time by hand (network without internet)
+// ══════════════════════════════════════════════════════════════════════════════
+static bool validDate(int y, int m, int d, int hh, int mm) {
+    static const uint8_t dim[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (y < 2024 || y > 2099 || m < 1 || m > 12 || hh > 23 || mm > 59 || d < 1) return false;
+    const bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    return d <= dim[m - 1] + (m == 2 && leap ? 1 : 0);
+}
+
+// Digits YYYYMMDDHHMM edited in place; cursor starts on the hour (after a
+// power-off the date is usually right, the time is not).
+static void runClockSet() {
+    time_t base = gClockOk ? time(nullptr) : hlogLastKnown();
+    if (base < 1700000000) base = 1767268800;          // 2026-01-01 12:00 UTC
+    struct tm tm;
+    localtime_r(&base, &tm);
+    char d[13];
+    snprintf(d, sizeof(d), "%04d%02d%02d%02d%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
+    int cur = 8;
+    uint32_t lastDraw = 0, msgUntil = 0;
+    const char* msg = nullptr;
+    for (;;) {
+        uiBackground();
+        const int c = uiKey();
+        if (c == '`') return;
+        if (c == ',' || c == '\b') { if (cur > 0) cur--; }
+        else if (c == '/') { if (cur < 11) cur++; }
+        else if (c >= '0' && c <= '9') { d[cur] = (char)c; if (cur < 11) cur++; }
+        else if (c == '\n') {
+            auto num = [&](int at, int len) { int v = 0; for (int k = 0; k < len; k++) v = v * 10 + (d[at + k] - '0'); return v; };
+            const int y = num(0, 4), mo = num(4, 2), dy = num(6, 2), hh = num(8, 2), mi = num(10, 2);
+            if (validDate(y, mo, dy, hh, mi) && hlogSetClock(y, mo, dy, hh, mi)) return;
+            msg = "Not a valid date / time"; msgUntil = millis() + 2500;
+        }
+        const uint32_t now = millis();
+        if (now - lastDraw < 60) { delay(5); continue; }
+        lastDraw = now;
+
+        uiFrame(">> SET CLOCK <<", ",/:move 0-9:type enter:save `:back");
+        const int W = canvas.width();
+        const uint16_t cDim = uiCol(138, 138, 138);
+        char l1[40];
+        snprintf(l1, sizeof(l1), "Date and time, 24 h, %s", kTzOpts[gHlog.tz].name);
+        canvas.setTextColor(cDim);
+        canvas.drawString(l1, 8, 20);
+        // "YYYY-MM-DD HH:MM" at text size 2 (12 px per char)
+        static const int8_t pos[12] = { 0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15 };
+        char shown[17];
+        snprintf(shown, sizeof(shown), "%.4s-%.2s-%.2s %.2s:%.2s", d, d + 4, d + 6, d + 8, d + 10);
+        const int fx = (W - 16 * 12) / 2, fy = 40;
+        canvas.fillRoundRect(fx - 6, fy - 5, 16 * 12 + 12, 26, 3, TFT_BLACK);
+        canvas.drawRoundRect(fx - 6, fy - 5, 16 * 12 + 12, 26, 3, gColA);
+        canvas.setTextSize(2);
+        for (int k = 0; k < 16; k++) {
+            const bool isCur = pos[cur] == k;
+            if (isCur && (now / 400) % 2 == 0) canvas.fillRect(fx + k * 12 - 1, fy - 2, 12, 20, gColA);
+            canvas.setTextColor(isCur ? TFT_WHITE : (shown[k] == '-' || shown[k] == ':' ? cDim : TFT_WHITE));
+            char ch[2] = { shown[k], 0 };
+            canvas.drawString(ch, fx + k * 12, fy);
+        }
+        canvas.setTextSize(1);
+        canvas.setTextColor(cDim);
+        canvas.drawString(gClockOk ? "Clock is set: correct it if needed" : "Clock NOT set: logging waits", 8, 74);
+        canvas.drawString("Kept over restarts, not power-off", 8, 86);
+        if (msg && now < msgUntil) uiCenter(msg, 103, uiCol(255, 140, 0));
+        else { canvas.setTextColor(uiCol(80, 80, 88)); canvas.drawString("Time zone: LOG SETUP > TIME ZONE", 8, 103); }
+        canvas.pushSprite(0, 0);
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // LOG SETUP
 // ══════════════════════════════════════════════════════════════════════════════
+static const int kSetupRows = 6;   // CLOCK, LOGGING, SNAPSHOT, KEEP, TIME ZONE, WEB ACCESS
+
 static void logSetupAdjust(int row, int dir) {
     auto stepIn = [&](const uint8_t* opts, int n, uint8_t cur) -> uint8_t {
         int k = 0;
@@ -159,29 +232,30 @@ static void logSetupAdjust(int row, int dir) {
         return opts[k];
     };
     switch (row) {
-        case 0:
+        case 0: runClockSet(); break;
+        case 1:
             if (gHlog.on) hlogSys("logging off");
             gHlog.on = !gHlog.on;
             if (gHlog.on) hlogSys("logging on");
             hlogFlush();
             break;
-        case 1: gHlog.snapMin  = stepIn(kSnapOpts, kNumSnap, gHlog.snapMin); break;
-        case 2: gHlog.keepDays = stepIn(kKeepOpts, kNumKeep, gHlog.keepDays); break;
-        case 3: hlogSetTz((uint8_t)((gHlog.tz + kNumTz + dir) % kNumTz)); break;
-        case 4: gHlog.web = !gHlog.web; break;
+        case 2: gHlog.snapMin  = stepIn(kSnapOpts, kNumSnap, gHlog.snapMin); break;
+        case 3: gHlog.keepDays = stepIn(kKeepOpts, kNumKeep, gHlog.keepDays); break;
+        case 4: hlogSetTz((uint8_t)((gHlog.tz + kNumTz + dir) % kNumTz)); break;
+        case 5: gHlog.web = !gHlog.web; break;
     }
 }
 
 static void runLogSetup() {
-    int cursor = 0;
+    int cursor = gClockOk ? 1 : 0;           // clock not set: start on CLOCK
     uint32_t lastDraw = 0;
     const uint8_t keepBefore = gHlog.keepDays;
     for (;;) {
         uiBackground();
         int c = uiKey();
         if (c == '`') break;
-        if (c == ';') cursor = (cursor + 4) % 5;
-        if (c == '.') cursor = (cursor + 1) % 5;
+        if (c == ';') cursor = (cursor + kSetupRows - 1) % kSetupRows;
+        if (c == '.') cursor = (cursor + 1) % kSetupRows;
         if (c == ',') { logSetupAdjust(cursor, -1); lastDraw = 0; }
         if (c == '/' || c == '\n') { logSetupAdjust(cursor, +1); lastDraw = 0; }
         const uint32_t now = millis();
@@ -191,30 +265,41 @@ static void runLogSetup() {
         uiFrame(">> LOG SETUP <<", ";/.:nav  ,//:change  `:save");
         const int W = canvas.width();
         const uint16_t cDim = uiCol(110, 110, 110);
-        const char* labels[5] = { "LOGGING", "SNAPSHOT", "KEEP", "TIME ZONE", "WEB ACCESS" };
-        for (int i = 0; i < 5; i++) {
-            const int y = 16 + i * 21;
+        const char* labels[kSetupRows] = { "CLOCK", "LOGGING", "SNAPSHOT", "KEEP", "TIME ZONE", "WEB ACCESS" };
+        for (int i = 0; i < kSetupRows; i++) {
+            const int y = 16 + i * 17;
             const bool sel = i == cursor;
             canvas.setTextColor(sel ? gColA : uiCol(4, 0, 8));
-            canvas.drawString(">", 4, y + 6);
+            canvas.drawString(">", 4, y + 5);
             canvas.setTextColor(sel ? TFT_WHITE : cDim);
-            canvas.drawString(labels[i], 16, y + 6);
+            canvas.drawString(labels[i], 16, y + 5);
             char v[32];
             uint16_t vc = sel ? gColB : cDim;
             switch (i) {
-                case 0: snprintf(v, sizeof(v), gHlog.on ? "ON" : "OFF");
+                case 0:
+                    if (gClockOk) {
+                        time_t t = time(nullptr);
+                        struct tm tm;
+                        localtime_r(&t, &tm);
+                        snprintf(v, sizeof(v), "%04d-%02d-%02d %02d:%02d >", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
+                    } else {
+                        snprintf(v, sizeof(v), "NOT SET >");
+                        vc = uiCol(255, 140, 0);
+                    }
+                    break;
+                case 1: snprintf(v, sizeof(v), gHlog.on ? "ON" : "OFF");
                         vc = gHlog.on ? uiCol(0, 210, 80) : uiCol(255, 72, 72); break;
-                case 1: snprintf(v, sizeof(v), "every %u min", (unsigned)gHlog.snapMin); break;
-                case 2: snprintf(v, sizeof(v), gHlog.keepDays == 1 ? "%u day" : "%u days", (unsigned)gHlog.keepDays); break;
-                case 3: snprintf(v, sizeof(v), "%s", kTzOpts[gHlog.tz].name); break;
-                case 4: if (gHlog.web) snprintf(v, sizeof(v), "ON  %s", wifiReady ? wifiIP : "no Wi-Fi");
+                case 2: snprintf(v, sizeof(v), "every %u min", (unsigned)gHlog.snapMin); break;
+                case 3: snprintf(v, sizeof(v), gHlog.keepDays == 1 ? "%u day" : "%u days", (unsigned)gHlog.keepDays); break;
+                case 4: snprintf(v, sizeof(v), "%s", kTzOpts[gHlog.tz].name); break;
+                case 5: if (gHlog.web) snprintf(v, sizeof(v), "ON  %s", wifiReady ? wifiIP : "no Wi-Fi");
                         else           snprintf(v, sizeof(v), "OFF");
                         if (!gHlog.web) vc = sel ? uiCol(255, 140, 0) : cDim;
                         break;
             }
             canvas.setTextColor(vc);
-            canvas.drawString(v, W - 8 - canvas.textWidth(v), y + 6);
-            if (i < 4) canvas.drawFastHLine(8, y + 19, W - 16, uiCol(35, 0, 50));
+            canvas.drawString(v, W - 8 - canvas.textWidth(v), y + 5);
+            if (i < kSetupRows - 1) canvas.drawFastHLine(8, y + 16, W - 16, uiCol(35, 0, 50));
         }
         canvas.pushSprite(0, 0);
     }
@@ -273,8 +358,8 @@ static void runLogsMenu() {
         canvas.drawString("EVENTS  SIZE", W - 8 - canvas.textWidth("EVENTS  SIZE"), 17);
         canvas.drawFastHLine(8, 26, W - 16, uiCol(35, 0, 50));
         if (n == 0) {
-            uiCenter(gClockOk ? "No log files yet" : "Waiting for the clock (NTP)", 60, cDim);
-            if (!gClockOk) uiCenter("needs the internet over Wi-Fi", 74, cMut);
+            uiCenter(gClockOk ? "No log files yet" : "Clock not set", 60, gClockOk ? cDim : uiCol(255, 140, 0));
+            if (!gClockOk) uiCenter("press s, then CLOCK", 74, cMut);
         }
         for (int vi = 0; vi < visRows; vi++) {
             const int i = scroll + vi;

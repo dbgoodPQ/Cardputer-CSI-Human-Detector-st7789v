@@ -121,9 +121,14 @@ room by room. Realistic target: **presence + motion** per room.
   (heap, ping/s), `hlogService()` every second from `serviceNodes()` (OFFLINE after 10 s silence,
   not while the Cardputer's own Wi-Fi is down or < 15 s after it came back; online seconds; HEALTH
   snapshot every `snapMin` on the clock; flush every 10 s or 3.5 KB; state every 60 s; day roll).
-- Clock: NTP (`configTzTime`) once Wi-Fi is up; no RTC. Lines before that wait in `gPend[24]`
-  and get their real time at clock set. Time zones = POSIX strings in `kTzOpts`.
-- Settings prefs "hlog": on, snap (1/5/10/15/30 min), keep (1/3/5/7/14/30 days, default 5,
+- Clock: no RTC. User's home network has NO internet, so NTP (`configTzTime`, still tried) never
+  answers there: the clock is set by hand in LOG SETUP > CLOCK (`runClockSet`, `hlogSetClock` ->
+  settimeofday, SYS "clock set (by hand)"). System time survives software restarts (RTC timer;
+  "clock set (kept over restart)"), not power-off. Last known time in prefs "hlog"/"last" every
+  10 min pre-fills the CLOCK screen. Bottom screen shows "set clock: ..." after 30 s without a
+  clock; settings LOGS row says NO CLOCK. Lines before the clock is set wait in `gPend[24]` and
+  get their real time at clock set. Time zones = POSIX strings in `kTzOpts`.
+- Settings prefs "hlog": last (epoch), on, snap (1/5/10/15/30 min), keep (1/3/5/7/14/30 days, default 5,
   today counts), tz (default New York), web. Keys in LOG SETUP: `,` `/` change.
 - LOGS menu (`runLogsMenu`, logs_ui.h): day list only (date, summary, size; `;` `.` scroll,
   `s` LOG SETUP). No on-device viewer: removed in 2.6.0-dev2 at the user's request (RAM:
@@ -184,7 +189,7 @@ room by room. Realistic target: **presence + motion** per room.
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
 
 ## Status (v2)
-🧪 fw 2.6.0-dev3 (branch `sd-logs`; dev3 = SD MISO fix, dev2 showed NO SD, Cardputer only): node health log on SD, LOGS list,
+🧪 fw 2.6.0-dev4 (branch `sd-logs`; dev4 = manual CLOCK for the no-internet network, dev3 = SD MISO fix, dev2 showed NO SD, Cardputer only): node health log on SD, LOGS list,
 HEALTH view, web download (2.6.0-dev1 also had an on-device log viewer, removed). Not yet tested on hardware (SD on the shared bus is the
 main risk). Design canvas "Cardputer Node Health Log Screens".
 🧪 fw 2.5.0-dev2 (main, merged from branches `v2.5` + `node-reliability` on 2026-11-15): node
@@ -221,14 +226,22 @@ back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
    (release tag v2.1.0-dev1), checks versions, records a 60 min empty (3 nodes in
    parallel, --port 4213/4214/4215), a walk per node (v2 parity on hardware) and
    "next room" per room; optionally --rate 100.
-2. **Node uptime soak**: nodes on 2.5.0-dev2, Cardputer on 2.6.0-dev2 with an SD card;
+2. **Node uptime soak**: nodes on 2.5.0-dev2, Cardputer on 2.6.0-dev4 with an SD card and the clock set;
    7 days, read online % in the HEALTH view (day files via the web page; health.py
    still works), then the router reboot / router off tests.
-3. **Signed reports and commands** (roadmap phase 5).
-4. **Presence event log** on the bottom screen with optional SD persistence.
-5. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)
+3. **Clock from a local time server (later, user asked to keep it as a note):** the home
+   network has no internet, so add a LOG SETUP > TIME SERVER row (IP typed, or AUTO =
+   internet pools) and query it at start + hourly (`configTzTime(tz, ip)`); keep the manual
+   CLOCK as the fallback. Candidate servers on the LAN: Windows (W32Time server, off by
+   default), Linux / Raspberry Pi (chrony `allow 192.168.0.0/16`), a NAS (NTP service
+   checkbox). The Linksys E3000 can't serve time without internet. Other options weighed:
+   web page sets the clock from the visitor's browser time (option B), M5Stack Unit RTC
+   (HYM8563, I2C 0x51) on Grove, but Grove is reserved for the LD2410.
+4. **Signed reports and commands** (roadmap phase 5).
+5. **Presence event log** on the bottom screen with optional SD persistence.
+6. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)
    for still people + distance; dots in the range cone (design agreed).
-6. **ESP32-C5 nodes** (MonsterC5) later: different `wifi_csi_acquire_config_t`.
+7. **ESP32-C5 nodes** (MonsterC5) later: different `wifi_csi_acquire_config_t`.
 
 ## Hardware inventory (chip cheat-sheet)
 - C5 (best CSI): MonsterC5, AWOK Dual Touch (2x each), Marauder v8.

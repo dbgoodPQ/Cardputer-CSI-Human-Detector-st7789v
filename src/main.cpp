@@ -461,6 +461,7 @@ static void drawMenu() {
             case 5:
                 if (!gSdOk)          snprintf(val, sizeof(val), "NO SD >");
                 else if (!gHlog.on)  snprintf(val, sizeof(val), "OFF >");
+                else if (!gClockOk)  snprintf(val, sizeof(val), "NO CLOCK >");
                 else                 snprintf(val, sizeof(val), "ON %ud >", (unsigned)gHlog.keepDays);
                 break;
             default: val[0] = '\0'; break;
@@ -591,8 +592,13 @@ static void drawBottom() {
     snprintf(foot, sizeof(foot), "mot  --%%             cut %.2f", gSens);
   canvas.setTextColor(cCyan, TFT_BLACK);
   canvas.drawString(foot, 4, gy + gh + 4);
-  canvas.setTextColor(cPurple, TFT_BLACK);
-  canvas.drawString(".:view  ,/:sensitivity  `:menu", 4, gy + gh + 15);
+  if (!gClockOk && gHlog.on && now > 30000) {     // no internet time: ask for it once a while
+    canvas.setTextColor(canvas.color565(255, 140, 0), TFT_BLACK);
+    canvas.drawString("set clock: ` > LOGS > s > CLOCK", 4, gy + gh + 15);
+  } else {
+    canvas.setTextColor(cPurple, TFT_BLACK);
+    canvas.drawString(".:view  ,/:sensitivity  `:menu", 4, gy + gh + 15);
+  }
 
   // outer frame + corner dots
   canvas.drawFastHLine(0,   0,   W, cBorder);

@@ -12,8 +12,11 @@
 // the Wi-Fi), SYS (the Cardputer itself) and a HEALTH snapshot of every online node
 // every N minutes (uptime, signal, router frames/s, free memory).
 //
-// The Cardputer has no battery-backed clock: the time comes from the internet
-// (NTP) over the home Wi-Fi. Lines made before the clock is set wait in memory.
+// The Cardputer has no battery-backed clock. The time comes from the internet
+// (NTP) when the home Wi-Fi has internet, else it is set by hand in LOG SETUP >
+// CLOCK (hlogSetClock). It survives software restarts (the ESP32 RTC timer keeps
+// running), not a power-off; the last known time is kept in prefs to pre-fill the
+// CLOCK screen. Lines made before the clock is set wait in memory.
 // Per-day counters (online %, offline / boot / drop counts, 15-min bars) live in
 // /CSIRADAR/state.bin so a Cardputer restart keeps today's numbers; past days get
 // one line each in /CSIRADAR/summary.csv (LOGS list and web page use it).
@@ -510,7 +513,25 @@ static void hlogApplyTz() {
     tzset();
 }
 
-static void hlogClockReady() {
+// Last known wall time, saved in prefs every 10 min: pre-fills LOG SETUP > CLOCK
+// after a power-off (the user then only corrects it).
+static void hlogSaveLast(time_t t) {
+    Preferences p;
+    p.begin("hlog", false);
+    p.putULong("last", (uint32_t)t);
+    p.end();
+}
+
+static time_t hlogLastKnown() {
+    Preferences p;
+    p.begin("hlog", true);
+    const uint32_t t = p.getULong("last", 0);
+    p.end();
+    return (time_t)t;
+}
+
+// how = "NTP", "by hand", "kept over restart"
+static void hlogClockReady(const char* how) {
     gClockOk = true;
     hlogApplyTz();
     const time_t nowT = time(nullptr);
@@ -522,9 +543,27 @@ static void hlogClockReady() {
         hlogWriteAt(t, gPend[k].text);
     }
     gPendN = 0;
-    hlogSys("clock set (NTP)");
+    hlogSys("clock set (%s)", how);
     if (gDayYmd == 0) hlogRollTo(ymdOf(nowT));
     hlogFlush();
+    hlogSaveLast(nowT);
+}
+
+// LOG SETUP > CLOCK: local date + time typed by hand.
+static bool hlogSetClock(int year, int mon, int day, int hour, int min) {
+    hlogApplyTz();
+    struct tm tm = {};
+    tm.tm_year = year - 1900; tm.tm_mon = mon - 1; tm.tm_mday = day;
+    tm.tm_hour = hour; tm.tm_min = min; tm.tm_sec = 0; tm.tm_isdst = -1;
+    const time_t t = mktime(&tm);
+    if (t < 1700000000) return false;
+    char was[8];
+    clockHHMM(was, sizeof(was));
+    struct timeval tv = { t, 0 };
+    settimeofday(&tv, nullptr);
+    if (!gClockOk) hlogClockReady("by hand");
+    else { hlogSys("clock set (by hand) was %s", was); hlogSaveLast(t); }
+    return true;
 }
 
 // ── per-second work, called from serviceNodes() ─────────────────────────────
@@ -542,7 +581,8 @@ static void hlogService(uint32_t now) {
         configTzTime(kTzOpts[gHlog.tz].posix, "pool.ntp.org", "time.google.com", "time.nist.gov");
         gNtpStarted = true;
     }
-    if (!gClockOk && gNtpStarted && time(nullptr) > 1700000000) hlogClockReady();
+    // valid time: NTP answered, or the RTC timer kept it over a software restart
+    if (!gClockOk && time(nullptr) > 1700000000) hlogClockReady(gNtpStarted ? "NTP" : "kept over restart");
 
     if (now - lastTick < 1000) return;
     lastTick = now;
@@ -602,7 +642,12 @@ static void hlogService(uint32_t now) {
     }
 
     if (gLogLen && now - gLogFlushMs >= 10000) hlogFlush();
-    if (now - lastState >= 60000) { lastState = now; hlogSaveState(); }
+    if (now - lastState >= 60000) {
+        lastState = now;
+        hlogSaveState();
+        static uint8_t mins = 0;
+        if (gClockOk && ++mins >= 10) { mins = 0; hlogSaveLast(time(nullptr)); }
+    }
 }
 
 static void hlogBegin() {

@@ -37,13 +37,19 @@ room by room. Realistic target: **presence + motion** per room.
       LD2410 later: dots on the centre line at the measured distance.
     - **ZONES** (`drawZones()`, include/zones_ui.h): one row per node, adaptive
       row height for up to 6.
+    - **HEALTH** (`drawHealth()`, include/logs_ui.h, fw 2.6): per node online % today
+      (`hlogAvail100`), uptime, drops/boots today, 24 h bar of 15-min slots
+      (green ok, red was offline), last event. `gViewMode` 0 cone, 1 zones, 2 health.
+    - The log viewer takes the external screen over (`gExtOwned` stops
+      `drawExternalView()`); same 240x180 canvas zoomed, 13 lines of 40 chars.
   - Bottom = built-in 1.14" (240x135): Wi-Fi IP, nodes pill (`nodesTag()`:
     `2/3 ON`, green/orange/red), banner (toast 2 s > NO WIFI > NO NODES >
     `>> ZONE <<` > CLEAR), zone chips, strongest-zone graph (0.5 line = cut-off),
     cut-off + key hints.
 - Keys: `,` `/` sensitivity = v2 smoothness cut-off `gSens` (0.30-0.60, step 0.02,
   default 0.42, prefs "sens", sent as `C,SENS` on change + every 5 s), `n`,
-  `.`, `` ` `` menu (PALETTE, SCREEN, EXT PANEL, WIFI NET, NODES; version top-right).
+  `.`, `` ` `` menu (PALETTE, SCREEN, EXT PANEL, WIFI NET, NODES, LOGS; version top-right;
+  6 rows of 17 px, `kMenuItems`).
   No `c`/`x`/`r`: v2 needs no calibration, cone scale is fixed in %.
 - Display hold: v2 nodes report raw contact; `getZone()` keeps a zone present
   for `kDisplayHoldMs` (10 s) after its last reported motion (`ZoneView.held` =
@@ -104,6 +110,29 @@ room by room. Realistic target: **presence + motion** per room.
 - CI builds `csi-node-esp32.bin` (merged: 0x1000 bootloader, 0x8000 partitions,
   0xe000 boot_app0, 0x10000 app; flash at 0x0).
 
+## Node health log (Cardputer, fw 2.6, `include/health_log.h`)
+- microSD on the shared SPI2 bus: SCK40 MISO39 MOSI14 CS12, `SPI.begin` + `SD.begin(12, SPI, 20 MHz)`
+  after `extPanel.init()` (`hlogBegin()` in setup). `ext_panel.h` has `spi_3wire = false` for this
+  (3-wire leaves MOSI half-duplex). Not yet confirmed on hardware. No card: retry every 30 s.
+- Files: `/CSIRADAR/logs/YYYY-MM-DD.csv` (header `time,node,id,event,detail`, local time,
+  commas in detail -> `;`), `/CSIRADAR/state.bin` (today's per-node counters + 96 15-min slots,
+  keyed by MAC, saved every 60 s; restored at clock set if same day), `/CSIRADAR/summary.csv`
+  (`date,offline,boots,drops` per closed day; LOGS list + web page).
+- Events from hooks in zones_core.h: `hlogOnReport()` after each N report (ONLINE first/back,
+  BOOT when uptime goes down, DROP when drops go up, gap = outage), `hlogOnHealthLine()` for H lines
+  (heap, ping/s), `hlogService()` every second from `serviceNodes()` (OFFLINE after 10 s silence,
+  not while the Cardputer's own Wi-Fi is down or < 15 s after it came back; online seconds; HEALTH
+  snapshot every `snapMin` on the clock; flush every 10 s or 3.5 KB; state every 60 s; day roll).
+- Clock: NTP (`configTzTime`) once Wi-Fi is up; no RTC. Lines before that wait in `gPend[24]`
+  and get their real time at clock set. Time zones = POSIX strings in `kTzOpts`.
+- Settings prefs "hlog": on, snap (1/5/10/15/30 min), keep (1/3/5/7/14/30 days, default 5,
+  today counts), tz (default New York), web. Keys in LOG SETUP: `,` `/` change.
+- Viewer (`runLogViewer`, logs_ui.h): index = offset of every 16th line + line numbers of event
+  lines (malloc, grows); reads 4 KB per redraw; today's file rescanned every 2 s and follows
+  the end. Keys `;` `.` `,` `/` `t` `b` `e` `` ` ``.
+- Web (`include/web_logs.h`, WebServer port 80, `handleClient()` from `serviceNodes()`): `/`,
+  `/logs.json`, `/logs/<day>.csv` (`?view=1` inline). Name checked with `ymdFromName()`.
+
 ## Build / run
 - `pio run -e cardputer-radar-csi -t upload` — Cardputer console (name kept from
   v1; only build). CI output `cardputer-csi-st7789v.bin`, flash at 0x0.
@@ -141,6 +170,9 @@ room by room. Realistic target: **presence + motion** per room.
 - `include/zones_core.h` — nodes storage, UDP reports/commands, zones, pairing
   plumbing, cone selection, chips, `nodesTag()`.
 - `include/zones_ui.h` — ZONES view, NODES menu, add-node flow.
+- `include/health_log.h` — node health log: SD, clock, events, day files, state, summary.
+- `include/logs_ui.h` — LOGS menu, LOG SETUP, log viewer, HEALTH view.
+- `include/web_logs.h` — log web page / downloads (port 80).
 - `tools/node_esp32/` — node firmware (PlatformIO, esp32dev).
 - `tools/csi_lab/` — PC tools (Python 3.10+, numpy, matplotlib): record.py
   (raw CSI from a node), replay.py (score v1/v2, --hold/--chain/--gate, plots),
@@ -150,6 +182,9 @@ room by room. Realistic target: **presence + motion** per room.
 - `docs/V2_ROADMAP.md` — v2 goals and the motion-detection rework plan.
 
 ## Status (v2)
+🧪 fw 2.6.0-dev1 (branch `sd-logs`, Cardputer only): node health log on SD, LOGS menu,
+viewer, HEALTH view, web download. Not yet tested on hardware (SD on the shared bus is the
+main risk). Design canvas "Cardputer Node Health Log Screens".
 🧪 fw 2.5.0-dev2 (main, merged from branches `v2.5` + `node-reliability` on 2026-11-15): node
 self-recovery from node-reliability + Cardputer cone in %, node diagnostics, no `r` key from v2.5, WiFiUDP
 flush fixes. Not yet tested on hardware. README previews in docs/screens re-rendered for 2.5
@@ -184,10 +219,9 @@ back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
    (release tag v2.1.0-dev1), checks versions, records a 60 min empty (3 nodes in
    parallel, --port 4213/4214/4215), a walk per node (v2 parity on hardware) and
    "next room" per room; optionally --rate 100.
-2. **Node uptime soak** (fw 2.5.0-dev2): flash all nodes, run
-   `python health.py --nodes 3 --csv health.csv` for 7 days, then the router
-   reboot / router off tests. Flash the Cardputer with 2.5.0-dev2 too (WiFiUDP
-   flush fix in `serviceNodes()`).
+2. **Node uptime soak**: nodes on 2.5.0-dev2, Cardputer on 2.6.0-dev1 with an SD card;
+   7 days, read online % in the HEALTH view / the day files (no PC needed; health.py
+   still works), then the router reboot / router off tests.
 3. **Signed reports and commands** (roadmap phase 5).
 4. **Presence event log** on the bottom screen with optional SD persistence.
 5. **HLK-LD2410 mmWave** (24 GHz, UART, 5 V) on the Grove port (G1/G2 = Serial1)

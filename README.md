@@ -39,6 +39,22 @@ in 43 minutes of empty rooms, walking detected about 99% of the time. Details an
   red up to 30%, yellow 31-70%, green above 70%.
 - Key `r` (5 m / 10 m) is gone, and so is the old `[c] cal all` hint in the ZONES view.
 
+**Firmware 2.6 (Cardputer only):**
+- **Node health log on the microSD card.** The Cardputer writes one file per day,
+  `/CSIRADAR/logs/2026-11-15.csv`, with every node's events: `ONLINE`, `OFFLINE`, `BOOT` (with the
+  reason), `DROP` (lost the Wi-Fi), `SYS` (the Cardputer itself) and a `HEALTH` snapshot of every
+  online node (uptime, signal, router frames/s, free memory) every minute. 5 days are kept by default.
+  The date and time come from the internet over your Wi-Fi (the Cardputer has no clock battery).
+- **settings > LOGS**: the day files with a short summary (`all ok`, `2 off 1 boot`, ...). Open one
+  and it shows on the external screen; scroll with `;` `.` (line) and `,` `/` (page), `t`/`b` for
+  top/bottom, `e` for events only, `` ` `` to close. `s` opens LOG SETUP: logging on/off, snapshot
+  interval, days kept, time zone, web access.
+- **HEALTH view** (key `.`): per node, online % today, uptime, drops and reboots today, a 24 h bar
+  (green = online, red = was offline) and its last event. Replaces `tools/csi_lab/health.py`.
+- **Download from any computer on your Wi-Fi:** open `http://<cardputer-ip>/` (the IP is on the
+  bottom screen). `/logs.json` lists the same as JSON; `curl -O http://<ip>/logs/2026-11-15.csv`
+  downloads a day. Read-only, no password: meant for a home network. Turn it off in LOG SETUP.
+
 **Which file to flash:** every firmware file carries its version, e.g.
 `csi-node-esp32-2.1.0-dev1-app.bin`. Update with the `-app.bin` files at `0x10000` (keeps Wi-Fi and
 pairing); the files without `-app` go at `0x0` and erase the saved Wi-Fi (nodes must be paired
@@ -144,10 +160,10 @@ The nodes join the same network when you pair them, so pick your home 2.4 GHz Wi
 | Key | Action |
 |-----|--------|
 | `n` | Range cone zone: AUTO (default, follows the zone with the strongest motion) → each node → AUTO. Shows the cone first if the zones view is open |
-| `.` | External screen view: range cone ↔ zones |
+| `.` | External screen view: range cone → zones → node health |
 | `,` | More sensitive: lowers the motion cut-off by 0.02 (default 0.42, range 0.30-0.60), sent to every node |
 | `/` | Less sensitive: raises the cut-off by 0.02 |
-| `` ` `` | Open settings menu (EXT PANEL = external backlight, NODES = sensor nodes) |
+| `` ` `` | Open settings menu (EXT PANEL = external backlight, NODES = sensor nodes, LOGS = node health log) |
 
 ---
 
@@ -228,6 +244,11 @@ are accepted from anyone on your local network.
 ---
 
 ## Troubleshooting
+
+- **LOGS says `NO SD`:** insert a microSD card formatted FAT32 (the Cardputer checks every 30 s).
+  Until then the newest lines wait in memory (a few dozen); older ones are lost.
+- **LOGS says `Waiting for the clock`:** the Cardputer needs the internet over Wi-Fi once after each
+  start to know the date. Wrong hour in the file names or lines: set TIME ZONE in LOG SETUP.
 
 - **Picture upside down:** build with `-DEXT_ROTATION=3` (add it to `build_flags` in `platformio.ini`).
 - **Colours inverted (black looks white):** set `cfg.invert = false` in `include/ext_panel.h`.

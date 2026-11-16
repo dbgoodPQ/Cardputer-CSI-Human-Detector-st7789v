@@ -416,7 +416,7 @@ static void runLogViewer(const char* dayName) {
     const bool live = ymdFromName(dayName) == gDayYmd;
     if (live) hlogFlush();
     gViewBuf = (char*)malloc(kViewBufLen);
-    if (!gViewBuf) { runConfirm(">> VIEWING LOG <<", "Not enough memory", "close other screens", "`:back"); return; }
+    if (!gViewBuf) { runConfirm(">> VIEWING LOG <<", "Not enough memory", nullptr, "`:back"); return; }
 
     // indexing a full day takes a moment: say so
     uiFrame(">> VIEWING LOG <<", "");

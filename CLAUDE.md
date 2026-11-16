@@ -118,6 +118,15 @@ room by room. Realistic target: **presence + motion** per room.
   `RESET <reason> in <stage> rom<N> <name> rev<R>` after a crash-type boot (PANIC/WDTs/BOD).
   The problem node is the only WROOM-32 (others WROOM-32D): older silicon (rev 0/1) has errata,
   e.g. a spurious watchdog reset at power-up on rev 0.
+- Problem node facts (serial, 2026-11-16): NODE A1CC, mac 7C9EBDEDA1CC, ESP32-D0WDQ6 **rev 1.0**,
+  flash JEDEC manufacturer `d8` device `4016` (4 MB, not a common maker), CP210x USB on COM6.
+  Every power-up: ROM `flash read err, 1000` on the first read, then the ROM's RTC watchdog
+  (`RTCWDT_RTC_RESET`, rom 16) resets it and the second boot works -> this is the "BOOT WDT after
+  each replug", a board/flash power-up problem, not firmware. Suspect: the same flash not answering
+  at run time = the ~30 min freeze. If RESET lines confirm odd resets, replace the board.
+- Flashing: app-only `firmware.bin` goes at **0x10000** only. Writing it at 0x0 (user did once)
+  overwrites the bootloader (ROM loops on `flash read err, 1000`) and NVS (pairing lost); fix =
+  `pio run -t erase` + `pio run -t upload --upload-port COMx`, then pair again.
 - WiFiUDP (Arduino-ESP32 2.0.17) keeps unread bytes of a datagram and then
   `parsePacket()` returns 0 forever: always `flush()` after `read()`. The
   Cardputer (`serviceNodes()`) and nodes (`serviceUdp()`) both flush since fw

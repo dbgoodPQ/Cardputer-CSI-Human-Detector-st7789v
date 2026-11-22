@@ -220,8 +220,9 @@ static bool runWifiPicker() {
             M5Cardputer.update();
             if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
                 gLastInputMs = millis();        // activity: no screen-off right after the picker
-                auto w = M5Cardputer.Keyboard.keysState().word;
-                if (!w.empty()) return w[0];
+                auto st = M5Cardputer.Keyboard.keysState();
+                if (st.del) return '\b';        // del key: no char in word, only the flag
+                if (!st.word.empty()) return st.word[0];
             }
             delay(10);
         }
@@ -319,7 +320,7 @@ static bool runWifiPicker() {
             else             snprintf(field, sizeof(field), "> <%s_", newPass + pl - (kShow - 1));
             canvas.setTextSize(1); canvas.setTextColor(TFT_WHITE, cBg);
             canvas.drawString(field, 8, H / 2 - 6);
-            ftr("type pwd  /:confirm  `:cancel"); canvas.pushSprite(0, 0);
+            ftr("type pwd del:erase /:confirm `:cancel");   // 37 chars = 222 px of 240 canvas.pushSprite(0, 0);
 
             char c = waitKey();
             if (c == '/') break;

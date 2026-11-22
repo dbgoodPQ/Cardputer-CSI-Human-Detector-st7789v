@@ -224,6 +224,7 @@ room by room. Realistic target: **presence + motion** per room.
   startup task, replaces W32Time; Linux: chrony config or bundled Python server). For next step 3.
 
 ## Status (v2)
+🧪 fw 2.6.0-dev9 (main): del key erases while typing the Wi-Fi password (`waitKey()` returns `'\b'` on `st.del`).
 🧪 fw 2.6.0-dev8 (main): Wi-Fi password shown in clear text while typing (tail shown, `<` prefix, past 35 chars).
 🧪 fw 2.6.0-dev7 (main, merged from branch `fix-issues-5-6-7` by PR #8, branch deleted): nodes RTC
 watchdog + reset step, Cardputer logs RESET/INFO (issue #5); dev6 = external backlight check +

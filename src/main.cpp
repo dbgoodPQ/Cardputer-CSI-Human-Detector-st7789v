@@ -320,7 +320,8 @@ static bool runWifiPicker() {
             else             snprintf(field, sizeof(field), "> <%s_", newPass + pl - (kShow - 1));
             canvas.setTextSize(1); canvas.setTextColor(TFT_WHITE, cBg);
             canvas.drawString(field, 8, H / 2 - 6);
-            ftr("type pwd del:erase /:confirm `:cancel");   // 37 chars = 222 px of 240 canvas.pushSprite(0, 0);
+            ftr("type pwd del:erase /:confirm `:cancel");   // 37 chars = 222 px of 240
+            canvas.pushSprite(0, 0);
 
             char c = waitKey();
             if (c == '/') break;

@@ -226,6 +226,7 @@ room by room. Realistic target: **presence + motion** per room.
 ## Status (v2)
 🧪 fw 2.6.0-dev7 (branch `fix-issues-5-6-7`): nodes RTC watchdog + reset step, Cardputer logs
 RESET/INFO (issue #5); dev6 = external backlight check + SCREEN OFF (#6); dev5 = TIME SERVER (#7).
+fw 2.6.0-dev8 (main + `fix-issues-5-6-7`): Wi-Fi password shown in clear text while typing (tail shown, `<` prefix, past 35 chars).
 🧪 fw 2.6.0-dev4 (branch `sd-logs`; dev4 = manual CLOCK for the no-internet network, dev3 = SD MISO fix, dev2 showed NO SD, Cardputer only): node health log on SD, LOGS list,
 HEALTH view, web download (2.6.0-dev1 also had an on-device log viewer, removed). Not yet tested on hardware (SD on the shared bus is the
 main risk). Design canvas "Cardputer Node Health Log Screens".

@@ -312,8 +312,11 @@ static bool runWifiPicker() {
             canvas.fillSprite(cBg);
             char h[30]; snprintf(h, sizeof(h), "PWD: %.18s", newSsid); hdr(h);
             int pl = (int)strlen(newPass);
-            char stars[65]; memset(stars, '*', pl); stars[pl] = '\0';
-            char field[70]; snprintf(field, sizeof(field), "> %s_", stars);
+            // shown in clear text; a long one shows its tail ("<" = more on the left)
+            const int kShow = 35;   // (240 - 8) px / 6 px - "> " - "_"
+            char field[70];
+            if (pl <= kShow) snprintf(field, sizeof(field), "> %s_", newPass);
+            else             snprintf(field, sizeof(field), "> <%s_", newPass + pl - (kShow - 1));
             canvas.setTextSize(1); canvas.setTextColor(TFT_WHITE, cBg);
             canvas.drawString(field, 8, H / 2 - 6);
             ftr("type pwd  /:confirm  `:cancel"); canvas.pushSprite(0, 0);

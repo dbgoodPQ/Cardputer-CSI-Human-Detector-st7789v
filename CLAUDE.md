@@ -224,10 +224,11 @@ room by room. Realistic target: **presence + motion** per room.
   startup task, replaces W32Time; Linux: chrony config or bundled Python server). For next step 3.
 
 ## Status (v2)
-🧪 fw 2.6.0-dev7 (branch `fix-issues-5-6-7`): nodes RTC watchdog + reset step, Cardputer logs
-RESET/INFO (issue #5); dev6 = external backlight check + SCREEN OFF (#6); dev5 = TIME SERVER (#7).
-fw 2.6.0-dev8 (main + `fix-issues-5-6-7`): Wi-Fi password shown in clear text while typing (tail shown, `<` prefix, past 35 chars).
-🧪 fw 2.6.0-dev4 (branch `sd-logs`; dev4 = manual CLOCK for the no-internet network, dev3 = SD MISO fix, dev2 showed NO SD, Cardputer only): node health log on SD, LOGS list,
+🧪 fw 2.6.0-dev8 (main): Wi-Fi password shown in clear text while typing (tail shown, `<` prefix, past 35 chars).
+🧪 fw 2.6.0-dev7 (main, merged from branch `fix-issues-5-6-7` by PR #8, branch deleted): nodes RTC
+watchdog + reset step, Cardputer logs RESET/INFO (issue #5); dev6 = external backlight check +
+SCREEN OFF (#6); dev5 = TIME SERVER (#7).
+🧪 fw 2.6.0-dev4 (main, merged from branch `sd-logs` by PR #4; dev4 = manual CLOCK for the no-internet network, dev3 = SD MISO fix, dev2 showed NO SD, Cardputer only): node health log on SD, LOGS list,
 HEALTH view, web download (2.6.0-dev1 also had an on-device log viewer, removed). Not yet tested on hardware (SD on the shared bus is the
 main risk). Design canvas "Cardputer Node Health Log Screens".
 🧪 fw 2.5.0-dev2 (main, merged from branches `v2.5` + `node-reliability` on 2026-11-15): node
@@ -267,7 +268,7 @@ back within 60 s; forced hang -> watchdog reboot within ~40 s; 7-day soak of
 2. **Node uptime soak**: nodes on 2.5.0-dev2, Cardputer on 2.6.0-dev4 with an SD card and the clock set;
    7 days, read online % in the HEALTH view (day files via the web page; health.py
    still works), then the router reboot / router off tests.
-3. **GitHub issues (branch `fix-issues-5-6-7`):** #7 clock from a LAN time server (done in
+3. **GitHub issues (fixes on main since PR #8):** #7 clock from a LAN time server (done in
    fw 2.6.0-dev5, not yet tested on hardware), #6 external screen black + backlight off until
    reboot, bottom screen fine (fw 2.6.0-dev6: backlight check + screen-off timer; check the day
    log for "ext backlight lost"; if it goes dark with no such line, suspect wiring/power), #5

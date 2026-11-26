@@ -5,7 +5,10 @@
 // (tools/node_esp32) measure Wi-Fi CSI motion in each room and report it over
 // UDP. The Cardputer joins the home Wi-Fi, pairs and manages the nodes, and
 // shows their motion on two screens:
-//   * External Waveshare 2" ST7789V (top): range cone, ZONES list or node HEALTH (key .).
+//   * External screen (top): range cone, ZONES list or node HEALTH (key .).
+//     Default build: Waveshare 2" ST7789V on SPI (ext_panel.h). Build with
+//     -DEXT_SCREENDRIVER=1 (env cardputer-radar-csi-ili9341): ScreenDriver =
+//     XIAO ESP32-C6 + 2.8" ILI9341 over UART (RemoteDisplay, top_gfx.h).
 //   * Built-in screen (bottom): status, CONTACT/CLEAR banner, zone chips, graph.
 // It also logs every node's health to the microSD card, one CSV per day
 // (health_log.h), shows the files (settings > LOGS) and serves them on port 80.
@@ -17,26 +20,40 @@
 #include <M5Cardputer.h>
 #include <M5Unified.h>
 #include <math.h>
+#ifndef EXT_SCREENDRIVER
+#define EXT_SCREENDRIVER 0
+#endif
+#if EXT_SCREENDRIVER
+#include "RemoteDisplay.h"       // link: G13 TX, G15 RX, G4 RTS, G6 CTS, UART1
+#else
 #include "ext_panel.h"
+#endif
 #include <Preferences.h>
 #include <WiFi.h>
 #include "esp_wifi.h"
+#if !EXT_SCREENDRIVER
 #include "soc/gpio_reg.h"        // backlight check (issue #6): GPIO matrix output select
 #include "soc/gpio_sig_map.h"    // LEDC_LS_SIG_OUT0_IDX
+#endif
 #include "fw_version.h"
 
 static bool  wifiReady = false;
 static char  wifiIP[16] = "---";
 
 static M5Canvas        canvas(&M5Cardputer.Display);   // bottom (built-in) buffer
+#if EXT_SCREENDRIVER
+static RemoteDisplay   ext;                            // external ScreenDriver (C6 + ILI9341, 320x240)
+#else
 static LGFX_ExtST7789  extPanel;                       // external Waveshare 2" ST7789V
 static M5Canvas        topCanvas(&extPanel);           // top render buffer (240x180)
+#endif
 static bool            extReady   = false;
 // v2 sensitivity = smoothness cut-off sent to every node (C,SENS). Lower = more
 // sensitive. Default = the tuned value (docs/V2_ROADMAP.md).
 static const float     kSensDefault = 0.42f, kSensMin = 0.30f, kSensMax = 0.60f, kSensStep = 0.02f;
 static float           gSens = kSensDefault;
 static const float     EXT_ZOOM   = 320.0f / 240.0f;   // 240x180 * 1.333 = 320x240, fills panel
+#include "top_gfx.h"         // `tg`: where the top views draw (canvas or ScreenDriver)
 
 // ── Color palettes & runtime settings ─────────────────────────────────────────
 struct Palette { uint8_t aR,aG,aB, bR,bG,bB; const char* name; };
@@ -76,11 +93,21 @@ static bool     gScreensOff  = false;
 static uint32_t gLastInputMs = 0;
 static uint32_t gExtDuty     = 0;    // LEDC duty the external backlight should have (issue #6 check)
 
+static inline uint8_t extLevel() { return (uint8_t)((uint32_t)gExtBright * 255 / 100); }
+
+#if EXT_SCREENDRIVER
+// The C6 drives the ILI9341 backlight. It forgets the level when it reboots:
+// the onRedraw callback (setup) sends it again.
+static void setExtBacklight() {
+    ext.setBrightness(extLevel());
+}
+#else
 // EXT panel BL is on GPIO4 (PWM). Remember the duty so serviceScreens() can spot it being lost.
 static void setExtBacklight() {
-    extPanel.setBrightness((uint8_t)((uint32_t)gExtBright * 255 / 100));
+    extPanel.setBrightness(extLevel());
     gExtDuty = ledcRead(EXT_BL_PWM_CH);
 }
+#endif
 
 static void applyBrightness() {
     M5Cardputer.Display.setBrightness((uint8_t)((uint32_t)gBright * 255 / 100));
@@ -91,6 +118,7 @@ static void applyBrightness() {
 // brightness drives the backlight PWM (applyBrightness) instead of scaling pixels.
 // Pixel-buffer dimming is kept only as a fallback: build with -DEXT_SOFT_DIM=1
 // if BL is wired to 3V3 instead of GPIO4.
+#if !EXT_SCREENDRIVER
 #ifndef EXT_SOFT_DIM
 #define EXT_SOFT_DIM 0
 #endif
@@ -108,6 +136,7 @@ static void applyExtBrightness() {
         buf[i] = __builtin_bswap16((r << 11) | (g << 5) | b);
     }
 }
+#endif
 
 static void saveSettings() {
     Preferences prefs;
@@ -140,7 +169,9 @@ static void loadSettings() {
 }
 
 // Small battery icon: 16x7 (14px body + 2px nub).  Level=-1 → grey/unknown.
-static void drawBatIcon(M5Canvas& c, int bx, int by) {
+// Template: draws on the bottom canvas and on the top target `tg` (canvas or TopGfx).
+template <class G>
+static void drawBatIcon(G& c, int bx, int by) {
   int  level = (int)M5.Power.getBatteryLevel();
   bool chg   = (M5.Power.isCharging() == 1);
   uint16_t col;
@@ -690,27 +721,27 @@ static void drawTop() {
   const int      zRssi   = zv.rssi;
   const char*    zMode   = zv.mode;
 
-  const int W = topCanvas.width();   // 240 (x1.333 on the panel)
-  const int H = topCanvas.height();  // 180
+  const int W = tg.width();   // 240 (x1.333 on the screen)
+  const int H = tg.height();  // 180
   const int apexX = 120, apexY = 166, topY = 22, halfTop = 112;
   const int coneH = apexY - topY;    // 144 px = full range
 
   const uint16_t cMag    = gColA;
   const uint16_t cCyan   = gColB;
-  const uint16_t cBar    = topCanvas.color565( 20,   0,  35);
-  const uint16_t cBorder = topCanvas.color565(160,   0, 160);
-  const uint16_t coneBg  = topCanvas.color565( 12,   0,  24);
-  const uint16_t cLine   = present ? topCanvas.color565(180, 0, 180) : topCanvas.color565(90, 0, 90);
+  const uint16_t cBar    = tg.color565( 20,   0,  35);
+  const uint16_t cBorder = tg.color565(160,   0, 160);
+  const uint16_t coneBg  = tg.color565( 12,   0,  24);
+  const uint16_t cLine   = present ? tg.color565(180, 0, 180) : tg.color565(90, 0, 90);
 
-  topCanvas.fillSprite(TFT_BLACK);
+  topFrameStart();                    // clears to black
 
   // --- cone, row by row: background + motion gauge fill from the apex up ---
   // Live motion: full colour. Display hold: last live level, dimmed. CLEAR: empty.
   const float level = !present ? 0.0f : (zv.held ? zv.heldMotion : zMotion);
   const float alpha = zv.held ? 0.28f : 0.62f;
-  const uint16_t cRed = topCanvas.color565(235, 40, 40);
-  const uint16_t cYel = topCanvas.color565(245, 205, 0);
-  const uint16_t cGrn = topCanvas.color565(0, 210, 80);
+  const uint16_t cRed = tg.color565(235, 40, 40);
+  const uint16_t cYel = tg.color565(245, 205, 0);
+  const uint16_t cGrn = tg.color565(0, 210, 80);
   const int fillTopY = apexY - (int)lroundf(level * coneH);
   for (int y = topY; y <= apexY; ++y) {
     int hw = halfTop * (apexY - y) / coneH;
@@ -719,26 +750,26 @@ static void drawTop() {
       const int pct = (int)lroundf(100.0f * (apexY - y) / coneH);   // 0 at the device, 100 at the top
       col = blend565(coneBg, coneBandCol(pct, cRed, cYel, cGrn), alpha);
     }
-    topCanvas.drawFastHLine(apexX - hw, y, 2 * hw + 1, col);
+    tg.drawFastHLine(apexX - hw, y, 2 * hw + 1, col);
   }
   if (level > 0.0f && fillTopY < apexY) {      // bright edge at the current level
     const int hw  = halfTop * (apexY - fillTopY) / coneH;
     const int pct = (int)lroundf(level * 100.0f);
     const uint16_t edge = coneBandCol(pct, cRed, cYel, cGrn);
-    topCanvas.drawFastHLine(apexX - hw, fillTopY, 2 * hw + 1, zv.held ? blend565(coneBg, edge, 0.5f) : edge);
+    tg.drawFastHLine(apexX - hw, fillTopY, 2 * hw + 1, zv.held ? blend565(coneBg, edge, 0.5f) : edge);
   }
-  topCanvas.drawLine(apexX, apexY, apexX - halfTop, topY, cBorder);
-  topCanvas.drawLine(apexX, apexY, apexX + halfTop, topY, cBorder);
+  tg.drawLine(apexX, apexY, apexX - halfTop, topY, cBorder);
+  tg.drawLine(apexX, apexY, apexX + halfTop, topY, cBorder);
 
   // --- 20% band lines + labels ---
-  topCanvas.setTextSize(1);
+  tg.setTextSize(1);
   for (int k = 1; k <= 5; ++k) {
     int y  = apexY - k * coneH / 5;
     int hw = halfTop * (apexY - y) / coneH;
-    topCanvas.drawFastHLine(apexX - hw, y, 2 * hw + 1, cLine);
+    tg.drawFastHLine(apexX - hw, y, 2 * hw + 1, cLine);
     char lb[6]; snprintf(lb, sizeof(lb), "%d%%", k * 20);
-    topCanvas.setTextColor(cCyan);
-    topCanvas.drawString(lb, apexX + hw - topCanvas.textWidth(lb) - 1, y - 9);
+    tg.setTextColor(cCyan);
+    tg.drawString(lb, apexX + hw - tg.textWidth(lb) - 1, y - 9);
   }
 
   // --- state text inside the cone ---
@@ -746,7 +777,7 @@ static void drawTop() {
   const char* small = nullptr;
   uint16_t bigCol = cCyan;
   if (noNodes) {
-    strcpy(big, "NO NODES"); bigCol = topCanvas.color565(255, 140, 0); small = "settings ` > NODES > ADD NODE";
+    strcpy(big, "NO NODES"); bigCol = tg.color565(255, 140, 0); small = "settings ` > NODES > ADD NODE";
   } else if (!wifiReady) {
     strcpy(big, "NO WIFI"); bigCol = TFT_RED; small = "settings ` > WIFI NET";
   } else if (!linkOk) {
@@ -754,94 +785,106 @@ static void drawTop() {
   } else if (strcmp(zMode, "NO CSI") == 0) {
     strcpy(big, "NO SIGNAL"); bigCol = TFT_RED; small = "node gets no router frames";
   } else if (strcmp(zMode, "CAL") == 0) {                     // v1 node only
-    strcpy(big, "CALIBRATING"); bigCol = topCanvas.color565(255, 140, 0); small = "leave the room";
+    strcpy(big, "CALIBRATING"); bigCol = tg.color565(255, 140, 0); small = "leave the room";
   } else if (present && zv.held) {
-    strcpy(big, "MOTION"); bigCol = topCanvas.color565(255, 120, 255); small = "a few seconds ago";
+    strcpy(big, "MOTION"); bigCol = tg.color565(255, 120, 255); small = "a few seconds ago";
   } else if (present) {
     snprintf(big, sizeof(big), "MOTION %d%%", (int)lroundf(zMotion * 100));
-    bigCol = topCanvas.color565(255, 120, 255); small = "distance unknown (Wi-Fi only)";
+    bigCol = tg.color565(255, 120, 255); small = "distance unknown (Wi-Fi only)";
   } else {
-    strcpy(big, "CLEAR"); bigCol = topCanvas.color565(0, 120, 150);
+    strcpy(big, "CLEAR"); bigCol = tg.color565(0, 120, 150);
   }
   // black shadow so the text stays readable over the coloured fill
-  topCanvas.setTextSize(2);
-  const int bigX = (W - topCanvas.textWidth(big)) / 2;
-  topCanvas.setTextColor(TFT_BLACK);
-  topCanvas.drawString(big, bigX + 1, 59);
-  topCanvas.setTextColor(bigCol);
-  topCanvas.drawString(big, bigX, 58);
+  tg.setTextSize(2);
+  const int bigX = (W - tg.textWidth(big)) / 2;
+  tg.setTextColor(TFT_BLACK);
+  tg.drawString(big, bigX + 1, 59);
+  tg.setTextColor(bigCol);
+  tg.drawString(big, bigX, 58);
   if (small) {
-    topCanvas.setTextSize(1);
-    const int smX = (W - topCanvas.textWidth(small)) / 2;
-    topCanvas.setTextColor(TFT_BLACK);
-    topCanvas.drawString(small, smX + 1, 83);
-    topCanvas.setTextColor(topCanvas.color565(200, 160, 216));
-    topCanvas.drawString(small, smX, 82);
+    tg.setTextSize(1);
+    const int smX = (W - tg.textWidth(small)) / 2;
+    tg.setTextColor(TFT_BLACK);
+    tg.drawString(small, smX + 1, 83);
+    tg.setTextColor(tg.color565(200, 160, 216));
+    tg.drawString(small, smX, 82);
   }
 
   // --- the viewer at the apex ---
-  topCanvas.fillRoundRect(apexX - 8, apexY - 3, 16, 6, 1, cCyan);
+  tg.fillRoundRect(apexX - 8, apexY - 3, 16, 6, 1, cCyan);
 
   // --- cone mode badge (only with nodes): AUTO follows motion, MANUAL = picked with n ---
   if (gNodeCount > 0) {
     const bool  autoMode = coneAuto();
     const char* badge    = autoMode ? "AUTO" : "MANUAL";
-    const int   bw       = topCanvas.textWidth(badge) + 10;
-    topCanvas.setTextSize(1);
+    const int   bw       = tg.textWidth(badge) + 10;
+    tg.setTextSize(1);
     if (autoMode) {
-      topCanvas.fillRoundRect(4, 136, bw, 12, 3, cCyan);
-      topCanvas.setTextColor(TFT_BLACK, cCyan);
+      tg.fillRoundRect(4, 136, bw, 12, 3, cCyan);
+      tg.setTextColor(TFT_BLACK, cCyan);
     } else {
-      topCanvas.fillRoundRect(4, 136, bw, 12, 3, TFT_BLACK);
-      topCanvas.drawRoundRect(4, 136, bw, 12, 3, cCyan);
-      topCanvas.setTextColor(cCyan, TFT_BLACK);
+      tg.fillRoundRect(4, 136, bw, 12, 3, TFT_BLACK);
+      tg.drawRoundRect(4, 136, bw, 12, 3, cCyan);
+      tg.setTextColor(cCyan, TFT_BLACK);
     }
-    topCanvas.drawString(badge, 9, 138);
-    topCanvas.setTextColor(topCanvas.color565(154, 106, 168));
-    topCanvas.drawString(autoMode ? "follows motion" : "n: next zone", 4, 152);
+    tg.drawString(badge, 9, 138);
+    tg.setTextColor(tg.color565(154, 106, 168));
+    tg.drawString(autoMode ? "follows motion" : "n: next zone", 4, 152);
   }
 
   // --- title bar: battery + zone | contact state | mode pill ---
-  topCanvas.setTextSize(1);
-  topCanvas.fillRect(0, 0, W, 14, cBar);
-  topCanvas.drawFastHLine(0, 13, W, cBorder);
-  drawBatIcon(topCanvas, 2, 3);
-  topCanvas.setTextColor(cCyan, cBar);
-  topCanvas.drawString(zv.name, 18, 3);              // which zone (range is on the lines)
+  tg.setTextSize(1);
+  tg.fillRect(0, 0, W, 14, cBar);
+  tg.drawFastHLine(0, 13, W, cBorder);
+  drawBatIcon(tg, 2, 3);
+  tg.setTextColor(cCyan, cBar);
+  tg.drawString(zv.name, 18, 3);              // which zone (range is on the lines)
   const char* title = present ? "[ CONTACT ]" : "[ CLEAR ]";
   bool blink = (now % 600) < 300;
-  topCanvas.setTextColor(present ? (blink ? topCanvas.color565(255, 60, 255) : cMag) : cMag, cBar);
-  topCanvas.drawString(title, (W - topCanvas.textWidth(title)) / 2, 3);
+  tg.setTextColor(present ? (blink ? tg.color565(255, 60, 255) : cMag) : cMag, cBar);
+  tg.drawString(title, (W - tg.textWidth(title)) / 2, 3);
   const char* tag = noNodes ? "NO NODES" : (!linkOk ? "OFFLINE" : zMode);
   uint16_t pill = (!linkOk || strcmp(zMode, "NO CSI") == 0) ? TFT_RED
                 : (strcmp(zMode, "CAL") == 0
-                   ? topCanvas.color565(255, 140, 0) : topCanvas.color565(0, 180, 80));
-  int tw = topCanvas.textWidth(tag) + 8;
-  topCanvas.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
-  topCanvas.setTextColor(TFT_WHITE, pill);
-  topCanvas.drawString(tag, W - tw + 1, 3);
+                   ? tg.color565(255, 140, 0) : tg.color565(0, 180, 80));
+  int tw = tg.textWidth(tag) + 8;
+  tg.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
+  tg.setTextColor(TFT_WHITE, pill);
+  tg.drawString(tag, W - tw + 1, 3);
 
   // --- footer corners ---
   char stats[24];
   snprintf(stats, sizeof(stats), "M:%d%% %ddBm", (int)lroundf(zMotion * 100), zRssi);
-  topCanvas.setTextColor(cCyan);
-  topCanvas.drawString(stats, 4, H - 10);
+  tg.setTextColor(cCyan);
+  tg.drawString(stats, 4, H - 10);
   const char* hint = gNodeCount == 0 ? "" : "[n] zone";
-  topCanvas.setTextColor(topCanvas.color565(154, 106, 168));
-  topCanvas.drawString(hint, W - topCanvas.textWidth(hint) - 4, H - 10);
+  tg.setTextColor(tg.color565(154, 106, 168));
+  tg.drawString(hint, W - tg.textWidth(hint) - 4, H - 10);
 
   // --- outer frame ---
-  topCanvas.drawRect(0, 0, W, H, cBorder);
+  tg.drawRect(0, 0, W, H, cBorder);
 
-  // scale-to-fit onto the 320x240 TFT (240x180 * EXT_ZOOM = 320x240, no letterbox)
-  applyExtBrightness();
-  topCanvas.pushRotateZoom(160, 120, 0.0f, EXT_ZOOM, EXT_ZOOM);
+  topFramePresent();                  // onto the 320x240 screen (top_gfx.h)
 }
 
 // --------------------------------------------------------------------------
 // Screens off after no key press, and the external backlight check (issue #6:
 // the external screen went black with its backlight off until a reboot).
 // --------------------------------------------------------------------------
+#if EXT_SCREENDRIVER
+static void screensOff() {
+  gScreensOff = true;
+  M5Cardputer.Display.setBrightness(0);
+  ext.setBrightness(0);
+}
+
+// Wake: both backlights back; the next frame redraws the external screen.
+static void screensOn() {
+  gScreensOff = false;
+  M5Cardputer.Display.setBrightness((uint8_t)((uint32_t)gBright * 255 / 100));
+  setExtBacklight();
+}
+#else
 static void screensOff() {
   gScreensOff = true;
   M5Cardputer.Display.setBrightness(0);
@@ -865,6 +908,7 @@ static void screensOn() {
   extPanel.reinitBacklight((uint8_t)((uint32_t)gExtBright * 255 / 100));
   gExtDuty = ledcRead(EXT_BL_PWM_CH);
 }
+#endif
 
 // Any key press: true if it only woke the screens (the caller then ignores it).
 static bool screensWakeKey() {
@@ -874,6 +918,7 @@ static bool screensWakeKey() {
   return true;
 }
 
+#if !EXT_SCREENDRIVER
 // GPIO4 still routed to the backlight's LEDC channel, and the duty unchanged?
 static void checkExtBacklight(uint32_t now) {
   const uint32_t sel = REG_READ(GPIO_FUNC0_OUT_SEL_CFG_REG + 4 * EXT_TFT_BL) & GPIO_FUNC0_OUT_SEL_V;
@@ -890,13 +935,23 @@ static void checkExtBacklight(uint32_t now) {
           missed ? " (again)" : "");
   missed = 0;
 }
+#endif
 
 static void serviceScreens(uint32_t now) {
   if (gLastInputMs == 0) gLastInputMs = now;
+#if EXT_SCREENDRIVER
+  if (gScreensOff) {                  // no frames while off: keep the link checks running
+    if (ext.wasReset()) ext.setBrightness(0);         // the C6 rebooted with its backlight on
+    ext.poll();
+    return;
+  }
+  if (gScrOffMin && now - gLastInputMs >= (uint32_t)gScrOffMin * 60000UL) { screensOff(); return; }
+#else
   if (gScreensOff) return;
   if (gScrOffMin && now - gLastInputMs >= (uint32_t)gScrOffMin * 60000UL) { screensOff(); return; }
   static uint32_t lastCheck = 0;
   if (now - lastCheck >= 5000) { lastCheck = now; checkExtBacklight(now); }
+#endif
 }
 
 // --------------------------------------------------------------------------
@@ -954,17 +1009,28 @@ void setup() {
   canvas.setColorDepth(16);
   canvas.createSprite(M5Cardputer.Display.width(), M5Cardputer.Display.height());
 
+#if EXT_SCREENDRIVER
+  // After M5Cardputer.begin() (the link resets its input pins). No retry: without
+  // the screen the app runs normally and the library connects when the C6 appears.
+  if (!ext.begin(1, 1500)) Serial.printf("# external screen: %s\n", ext.lastError());
+  ext.onRedraw([] {                   // after a C6 reboot / reconnect / lost command
+    ext.setBrightness(gScreensOff ? 0 : extLevel());
+    tg.invalidate();                  // send every band of this frame
+  });
+  extReady = true;                    // drawing is dropped while the link is down
+#else
   extPanel.init();
   extPanel.setRotation(EXT_ROTATION);
   extPanel.fillScreen(TFT_BLACK);
   topCanvas.setColorDepth(16);
   extReady = (topCanvas.createSprite(240, 180) != nullptr);  // 240x180 * EXT_ZOOM = 320x240, fills panel
+#endif
 
   loadSettings();
   applyBrightness();
 
   loadNodes();
-  hlogBegin();          // SD card + log settings (after the external panel: shared SPI bus)
+  hlogBegin();          // SD card + log settings (ST7789V build: after the panel, shared SPI bus)
   initWifi();
 }
 

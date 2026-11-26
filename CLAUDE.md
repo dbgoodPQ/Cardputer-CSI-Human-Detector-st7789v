@@ -64,6 +64,37 @@ room by room. Realistic target: **presence + motion** per room.
   present only by hold; cone shows "MOTION / a few seconds ago"). v1 nodes
   (8-field reports) are shown as before.
 
+## Second console build: ScreenDriver ILI9341 (fw 2.6.0-dev10, branch `ili9341-screendriver`)
+- Env `cardputer-radar-csi-ili9341` (`-DEXT_SCREENDRIVER=1`): same app, top screen = ScreenDriver
+  (XIAO ESP32-C6 + 2.8" ILI9341 320x240, repo `C:\workspaces\ScreenDriver`, library RemoteDisplay via
+  `symlink://C:/workspaces/ScreenDriver/cardputer/lib/RemoteDisplay` + `-IC:/workspaces/ScreenDriver/shared`).
+  Local build only (not in CI: the library is a local path). Build from PowerShell. Never flash the
+  Cardputer over USB for this build: copy `firmware.bin` to `E:\firmwares\cardputer-csi-ili9341-<ver>.bin`
+  and start it from the launcher.
+- Link pins G13 TX, G15 RX, G4 RTS, G6 CTS, **UART1** (G4/G6 were the ST7789V's BL/DC). The LD2410
+  (next step 6) can't use `Serial1` in this build: use UART2 (`Serial2`).
+- `include/top_gfx.h`: the cone/ZONES/HEALTH views draw through `tg` in a 240x180 layout between
+  `topFrameStart()` / `topFramePresent()`. ST7789V build: `tg` = `topCanvas` + `pushRotateZoom`.
+  ILI9341 build: `tg` = `TopGfx` adapter on `RemoteDisplay ext`, coordinates x4/3 (areas cover their
+  320x240 pixels, so the cone has no gaps), text = C6 GLCD font at native size (`textWidth()` in 240x180
+  units). Use only `tg` methods the adapter has in those views.
+- Changed bands only (fw 2.6.0-dev11): `TopGfx` records a frame's calls (max 1000 ops / 3 KB text,
+  ~31 KB static RAM); at present the screen = 8 bands of 30 rows, each hashed over the calls touching
+  it; only changed bands are replayed under a clip rect, so the C6 flushes only those rows. Unchanged
+  frame = empty frame (onRedraw still gets its chance; it calls `tg.invalidate()`). List full ->
+  rest of the frame drawn directly, next frame sends all. Reason: the dev10 full redraw (150 KB to the
+  panel 8x/s) made the whole picture jump 1-2 px sideways now and then; other ScreenDriver apps
+  (small updates) were steady. If a jump still shows on a view switch, try C6 env `xiao_c6_40mhz`.
+  `drawBatIcon` is a template (bottom canvas and `tg`).
+- `ext.begin(1, 1500)` once in setup, no retry; drawing is dropped while the link is down and the
+  library reconnects by itself. EXT PANEL = `ext.setBrightness()` (C6 forgets it on reboot: re-sent in
+  `onRedraw`). SCREEN OFF: brightness 0, `ext.poll()` in `serviceScreens()`. No issue-#6 backlight
+  check (no GPIO4 backlight). SD: `hlogBegin()` mounts it alone (no shared panel bus).
+- The library needs ESP-IDF 5; this app is on core 2.0.17 (IDF 4.4). `ScreenDriver/shared/sd_link.h`
+  has `ESP_IDF_VERSION_MAJOR` guards (UART_SCLK_APB, no pin-state diagnostics on IDF 4.4). The link
+  on core 2 is not yet tested on hardware.
+- Local tools: esptool (platform 6.12.0) runs under the system Python 3.12; it needs `intelhex`.
+
 ## Sensor nodes (ESP32-WROOM-32/32D, `tools/node_esp32`)
 - One generic firmware; no names/creds built in. Protocol + pairing crypto in
   `include/node_proto.h` (shared by both builds; node build uses `-I../../include`).
@@ -204,6 +235,7 @@ room by room. Realistic target: **presence + motion** per room.
   `onWifiUp`, `serviceWifi`), settings menu, `drawBottom()`, `drawTop()` (range
   cone), `serviceKeys()`. Bottom @30 fps, top @8 fps.
 - `include/ext_panel.h` — external ST7789V panel class (`LGFX_ExtST7789`).
+- `include/top_gfx.h` — top-view drawing target `tg` (canvas, or `TopGfx` on ScreenDriver).
 - `include/node_proto.h` — node protocol + pairing crypto (shared with the node build).
 - `include/csi_v2.h` — v2 frame gate + detector (node firmware and PC parity test).
 - `include/fw_version.h` — `FW_VERSION` for both firmwares and the binary names.
@@ -224,6 +256,9 @@ room by room. Realistic target: **presence + motion** per room.
   startup task, replaces W32Time; Linux: chrony config or bundled Python server). For next step 3.
 
 ## Status (v2)
+🧪 fw 2.6.0-dev11 (branch `ili9341-screendriver`): ILI9341 build sends only changed bands (fix for the
+sideways jump). dev10: second console build for the ScreenDriver ILI9341 +
+XIAO C6 (env `cardputer-radar-csi-ili9341`); ST7789V build unchanged. Builds; not yet tested on hardware.
 🧪 fw 2.6.0-dev9 (main): del key erases while typing the Wi-Fi password (`waitKey()` returns `'\b'` on `st.del`).
 🧪 fw 2.6.0-dev8 (main): Wi-Fi password shown in clear text while typing (tail shown, `<` prefix, past 35 chars).
 🧪 fw 2.6.0-dev7 (main, merged from branch `fix-issues-5-6-7` by PR #8, branch deleted): nodes RTC

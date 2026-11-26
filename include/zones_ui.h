@@ -110,34 +110,34 @@ static const char* zoneStatus(const ZoneView& v, char* buf, size_t n, uint16_t& 
 static void drawZones() {
     if (!extReady) return;
     const uint32_t now = millis();
-    const int W = topCanvas.width(), H = topCanvas.height();
+    const int W = tg.width(), H = tg.height();
     const int  act = activeZone(now);
 
-    const uint16_t cBar    = topCanvas.color565(20, 0, 35);
-    const uint16_t cBorder = topCanvas.color565(160, 0, 160);
-    const uint16_t cSub    = topCanvas.color565(154, 138, 176);
+    const uint16_t cBar    = tg.color565(20, 0, 35);
+    const uint16_t cBorder = tg.color565(160, 0, 160);
+    const uint16_t cSub    = tg.color565(154, 138, 176);
 
-    topCanvas.fillSprite(TFT_BLACK);
-    topCanvas.setTextSize(1);
+    topFrameStart();                    // clears to black
+    tg.setTextSize(1);
 
     // title bar
-    topCanvas.fillRect(0, 0, W, 14, cBar);
-    topCanvas.drawFastHLine(0, 13, W, cBorder);
-    drawBatIcon(topCanvas, 2, 3);
-    topCanvas.setTextColor(gColB, cBar);
-    topCanvas.drawString("ZONES", 18, 3);
+    tg.fillRect(0, 0, W, 14, cBar);
+    tg.drawFastHLine(0, 13, W, cBorder);
+    drawBatIcon(tg, 2, 3);
+    tg.setTextColor(gColB, cBar);
+    tg.drawString("ZONES", 18, 3);
     const char* title = act >= 0 ? "[ CONTACT ]" : "[ CLEAR ]";
-    topCanvas.setTextColor(gColA, cBar);
-    topCanvas.drawString(title, (W - topCanvas.textWidth(title)) / 2, 3);
+    tg.setTextColor(gColA, cBar);
+    tg.drawString(title, (W - tg.textWidth(title)) / 2, 3);
     char tb[12];
     int  lvl;
     const char* tag = nodesTag(now, tb, sizeof(tb), lvl);
     uint16_t pill = lvl == 2 ? TFT_RED
-                  : (lvl == 1 ? topCanvas.color565(255, 140, 0) : topCanvas.color565(0, 180, 80));
-    int tw = topCanvas.textWidth(tag) + 8;
-    topCanvas.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
-    topCanvas.setTextColor(TFT_WHITE, pill);
-    topCanvas.drawString(tag, W - tw + 1, 3);
+                  : (lvl == 1 ? tg.color565(255, 140, 0) : tg.color565(0, 180, 80));
+    int tw = tg.textWidth(tag) + 8;
+    tg.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
+    tg.setTextColor(TFT_WHITE, pill);
+    tg.drawString(tag, W - tw + 1, 3);
 
     // rows
     const int n = zoneCount();
@@ -149,17 +149,17 @@ static void drawZones() {
         ZoneView v = getZone(z, now);
         const int y = top + z * rowH, h = rowH - 2;
         uint16_t bg, border, nameCol;
-        if (!v.online)      { bg = topCanvas.color565(12, 12, 12); border = topCanvas.color565(58, 58, 58); nameCol = topCanvas.color565(154, 154, 154); }
-        else if (v.present) { bg = topCanvas.color565(60, 0, 60);  border = gColA;                         nameCol = topCanvas.color565(255, 120, 255); }
-        else                { bg = topCanvas.color565(0, 0, 25);   border = topCanvas.color565(70, 0, 70); nameCol = gColB; }
-        topCanvas.fillRoundRect(4, y, W - 8, h, 4, bg);
-        topCanvas.drawRoundRect(4, y, W - 8, h, 4, border);
+        if (!v.online)      { bg = tg.color565(12, 12, 12); border = tg.color565(58, 58, 58); nameCol = tg.color565(154, 154, 154); }
+        else if (v.present) { bg = tg.color565(60, 0, 60);  border = gColA;                         nameCol = tg.color565(255, 120, 255); }
+        else                { bg = tg.color565(0, 0, 25);   border = tg.color565(70, 0, 70); nameCol = gColB; }
+        tg.fillRoundRect(4, y, W - 8, h, 4, bg);
+        tg.drawRoundRect(4, y, W - 8, h, 4, border);
 
         char vb[16];
         uint16_t vcol;
         const char* val = zoneStatus(v, vb, sizeof(vb), vcol);
-        topCanvas.setTextColor(nameCol);
-        topCanvas.drawString(v.name, 10, y + (tall ? 5 : 3));
+        tg.setTextColor(nameCol);
+        tg.drawString(v.name, 10, y + (tall ? 5 : 3));
 
         if (tall) {
             char sub[32], age[12];
@@ -167,56 +167,55 @@ static void drawZones() {
             else if (!v.online)                 snprintf(sub, sizeof(sub), "never reported");
             else if (!v.present && v.lastMotionMs) { fmtAge(now - v.lastMotionMs, age, sizeof(age)); snprintf(sub, sizeof(sub), "last motion %s ago", age); }
             else                                snprintf(sub, sizeof(sub), "%ddBm  %u/s", v.rssi, (unsigned)v.rate);
-            topCanvas.setTextColor(v.online ? cSub : topCanvas.color565(138, 138, 138));
-            topCanvas.drawString(sub, 10, y + 16);
+            tg.setTextColor(v.online ? cSub : tg.color565(138, 138, 138));
+            tg.drawString(sub, 10, y + 16);
             if (v.online && v.present) {
                 char pct[8];
                 snprintf(pct, sizeof(pct), "%d%%", (int)lroundf(v.motion * 100));
-                topCanvas.setTextSize(2);
-                topCanvas.setTextColor(vcol);
-                int pw = topCanvas.textWidth(pct);
-                topCanvas.drawString(pct, W - 10 - pw, y + 7);
-                topCanvas.setTextSize(1);
-                topCanvas.drawString("MOTION", W - 10 - pw - 4 - topCanvas.textWidth("MOTION"), y + 11);
+                tg.setTextSize(2);
+                tg.setTextColor(vcol);
+                int pw = tg.textWidth(pct);
+                tg.drawString(pct, W - 10 - pw, y + 7);
+                tg.setTextSize(1);
+                tg.drawString("MOTION", W - 10 - pw - 4 - tg.textWidth("MOTION"), y + 11);
             } else {
-                topCanvas.setTextColor(vcol);
-                topCanvas.drawString(val, W - 10 - topCanvas.textWidth(val), y + 11);
+                tg.setTextColor(vcol);
+                tg.drawString(val, W - 10 - tg.textWidth(val), y + 11);
             }
         } else {
-            topCanvas.setTextColor(vcol);
-            topCanvas.drawString(val, W - 10 - topCanvas.textWidth(val), y + 3);
+            tg.setTextColor(vcol);
+            tg.drawString(val, W - 10 - tg.textWidth(val), y + 3);
         }
 
         // motion bar + threshold tick
         const int by = y + h - 6;
-        topCanvas.fillRect(10, by, 220, 3, v.online ? topCanvas.color565(42, 0, 51) : topCanvas.color565(30, 30, 30));
+        tg.fillRect(10, by, 220, 3, v.online ? tg.color565(42, 0, 51) : tg.color565(30, 30, 30));
         if (v.online) {
             int bw = (int)(v.motion * 220);
-            if (bw > 0) topCanvas.fillRect(10, by, bw, 3, v.present ? gColA : topCanvas.color565(0, 160, 200));
-            topCanvas.drawFastVLine(thrX, by - 2, 7, v.present ? TFT_WHITE : topCanvas.color565(180, 0, 180));
+            if (bw > 0) tg.fillRect(10, by, bw, 3, v.present ? gColA : tg.color565(0, 160, 200));
+            tg.drawFastVLine(thrX, by - 2, 7, v.present ? TFT_WHITE : tg.color565(180, 0, 180));
         }
     }
 
     if (gNodeCount == 0) {
-        topCanvas.setTextColor(topCanvas.color565(138, 138, 138));
+        tg.setTextColor(tg.color565(138, 138, 138));
         const char* l1 = "No sensor nodes yet";
         const char* l2 = "Add one: ` > NODES > ADD NODE";
-        topCanvas.drawString(l1, (W - topCanvas.textWidth(l1)) / 2, 90);
-        topCanvas.drawString(l2, (W - topCanvas.textWidth(l2)) / 2, 104);
+        tg.drawString(l1, (W - tg.textWidth(l1)) / 2, 90);
+        tg.drawString(l2, (W - tg.textWidth(l2)) / 2, 104);
     }
 
     // footer
     char thr[16];
     snprintf(thr, sizeof(thr), "cut %.2f", gSens);
-    topCanvas.setTextColor(gColB);
-    topCanvas.drawString(thr, 4, H - 10);
+    tg.setTextColor(gColB);
+    tg.drawString(thr, 4, H - 10);
     const char* hint = "[.] view  [n] cone";
-    topCanvas.setTextColor(topCanvas.color565(154, 106, 168));
-    topCanvas.drawString(hint, W - topCanvas.textWidth(hint) - 4, H - 10);
-    topCanvas.drawRect(0, 0, W, H, cBorder);
+    tg.setTextColor(tg.color565(154, 106, 168));
+    tg.drawString(hint, W - tg.textWidth(hint) - 4, H - 10);
+    tg.drawRect(0, 0, W, H, cBorder);
 
-    applyExtBrightness();
-    topCanvas.pushRotateZoom(160, 120, 0.0f, EXT_ZOOM, EXT_ZOOM);
+    topFramePresent();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

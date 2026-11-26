@@ -15,38 +15,38 @@
 static void drawHealth() {
     if (!extReady) return;
     const uint32_t now = millis();
-    const int W = topCanvas.width(), H = topCanvas.height();
-    const uint16_t cBar    = topCanvas.color565(20, 0, 35);
-    const uint16_t cBorder = topCanvas.color565(160, 0, 160);
-    const uint16_t cDim    = topCanvas.color565(154, 138, 176);
-    const uint16_t cMut    = topCanvas.color565(110, 110, 120);
-    const uint16_t cOk     = topCanvas.color565(0, 210, 80);
-    const uint16_t cWarn   = topCanvas.color565(255, 140, 0);
-    const uint16_t cBad    = topCanvas.color565(255, 72, 72);
-    const uint16_t cEmpty  = topCanvas.color565(30, 8, 36);
+    const int W = tg.width(), H = tg.height();
+    const uint16_t cBar    = tg.color565(20, 0, 35);
+    const uint16_t cBorder = tg.color565(160, 0, 160);
+    const uint16_t cDim    = tg.color565(154, 138, 176);
+    const uint16_t cMut    = tg.color565(110, 110, 120);
+    const uint16_t cOk     = tg.color565(0, 210, 80);
+    const uint16_t cWarn   = tg.color565(255, 140, 0);
+    const uint16_t cBad    = tg.color565(255, 72, 72);
+    const uint16_t cEmpty  = tg.color565(30, 8, 36);
 
-    topCanvas.fillSprite(TFT_BLACK);
-    topCanvas.setTextSize(1);
+    topFrameStart();                    // clears to black
+    tg.setTextSize(1);
 
     // title bar: battery + HEALTH | [ TODAY hh:mm ] | nodes pill
-    topCanvas.fillRect(0, 0, W, 14, cBar);
-    topCanvas.drawFastHLine(0, 13, W, cBorder);
-    drawBatIcon(topCanvas, 2, 3);
-    topCanvas.setTextColor(gColB, cBar);
-    topCanvas.drawString("HEALTH", 18, 3);
+    tg.fillRect(0, 0, W, 14, cBar);
+    tg.drawFastHLine(0, 13, W, cBorder);
+    drawBatIcon(tg, 2, 3);
+    tg.setTextColor(gColB, cBar);
+    tg.drawString("HEALTH", 18, 3);
     char clk[8], title[20];
     clockHHMM(clk, sizeof(clk));
     snprintf(title, sizeof(title), "[ TODAY %s ]", clk);
-    topCanvas.setTextColor(gColA, cBar);
-    topCanvas.drawString(title, (W - topCanvas.textWidth(title)) / 2, 3);
+    tg.setTextColor(gColA, cBar);
+    tg.drawString(title, (W - tg.textWidth(title)) / 2, 3);
     char tb[12];
     int  lvl;
     const char* tag = nodesTag(now, tb, sizeof(tb), lvl);
-    uint16_t pill = lvl == 2 ? TFT_RED : (lvl == 1 ? cWarn : topCanvas.color565(0, 180, 80));
-    int tw = topCanvas.textWidth(tag) + 8;
-    topCanvas.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
-    topCanvas.setTextColor(TFT_WHITE, pill);
-    topCanvas.drawString(tag, W - tw + 1, 3);
+    uint16_t pill = lvl == 2 ? TFT_RED : (lvl == 1 ? cWarn : tg.color565(0, 180, 80));
+    int tw = tg.textWidth(tag) + 8;
+    tg.fillRoundRect(W - tw - 3, 1, tw, 11, 3, pill);
+    tg.setTextColor(TFT_WHITE, pill);
+    tg.drawString(tag, W - tw + 1, 3);
 
     // where "now" is on the 24 h bars
     int nowSlot = 96;
@@ -67,19 +67,19 @@ static void drawHealth() {
         const NodeLive& L = gLive[i];
         const int a = hlogAvail100(i);
         const bool bad = !on || (a >= 0 && a < 9990);
-        topCanvas.fillRoundRect(4, y, W - 8, h, 4, topCanvas.color565(7, 0, 12));
-        topCanvas.drawRoundRect(4, y, W - 8, h, 4, bad ? cWarn : topCanvas.color565(58, 16, 64));
+        tg.fillRoundRect(4, y, W - 8, h, 4, tg.color565(7, 0, 12));
+        tg.drawRoundRect(4, y, W - 8, h, 4, bad ? cWarn : tg.color565(58, 16, 64));
 
         // line 1: name + state | online % today
-        topCanvas.setTextColor(TFT_WHITE);
-        topCanvas.drawString(gNodes[i].name, 10, y + 4);
-        topCanvas.setTextColor(on ? cOk : cBad);
-        topCanvas.drawString(on ? "ONLINE" : "OFFLINE", 10 + topCanvas.textWidth(gNodes[i].name) + 6, y + 4);
+        tg.setTextColor(TFT_WHITE);
+        tg.drawString(gNodes[i].name, 10, y + 4);
+        tg.setTextColor(on ? cOk : cBad);
+        tg.drawString(on ? "ONLINE" : "OFFLINE", 10 + tg.textWidth(gNodes[i].name) + 6, y + 4);
         char pct[12];
         if (a < 0) snprintf(pct, sizeof(pct), "--");
         else       snprintf(pct, sizeof(pct), "%d.%02d%%", a / 100, a % 100);
-        topCanvas.setTextColor(a < 0 ? cMut : (bad ? cWarn : cOk));
-        topCanvas.drawString(pct, W - 10 - topCanvas.textWidth(pct), y + 4);
+        tg.setTextColor(a < 0 ? cMut : (bad ? cWarn : cOk));
+        tg.drawString(pct, W - 10 - tg.textWidth(pct), y + 4);
 
         // line 2: uptime, drops and reboots today
         char up[8] = "-", l2[48];
@@ -87,8 +87,8 @@ static void drawHealth() {
         const unsigned drops = nh ? nh->dropN : 0, boots = nh ? nh->bootN : 0;
         if (boots && L.hasDiag) snprintf(l2, sizeof(l2), "up %s  drop %u  boot %u %s", up, drops, boots, L.boot);
         else                    snprintf(l2, sizeof(l2), "up %s  drop %u  boot %u", up, drops, boots);
-        topCanvas.setTextColor(drops || boots ? cWarn : cDim);
-        topCanvas.drawString(l2, 10, y + 15);
+        tg.setTextColor(drops || boots ? cWarn : cDim);
+        tg.drawString(l2, 10, y + 15);
 
         // 24 h bar, 15-min slots: green ok, red was offline, dark = no data / later
         const int by = rowH >= 40 ? y + 26 : y + h - 7, bh = rowH >= 40 ? 5 : 3;
@@ -97,9 +97,9 @@ static void drawHealth() {
             const uint8_t v = nh ? nh->slots[s] : 0;
             uint16_t col = v == 2 ? cBad : (v == 1 ? cOk : cEmpty);
             if (s > nowSlot) col = cEmpty;
-            topCanvas.fillRect(x0, by, x1 - x0, bh, col);
+            tg.fillRect(x0, by, x1 - x0, bh, col);
         }
-        if (nowSlot < 96) topCanvas.drawFastVLine(10 + (nowSlot + 1) * 220 / 96, by - 1, bh + 2, TFT_WHITE);
+        if (nowSlot < 96) tg.drawFastVLine(10 + (nowSlot + 1) * 220 / 96, by - 1, bh + 2, TFT_WHITE);
 
         // line 4: last event (tall rows only)
         if (rowH >= 44) {
@@ -117,17 +117,17 @@ static void drawHealth() {
                 snprintf(l4, sizeof(l4), "no event today");
             }
             l4[37] = '\0';
-            topCanvas.setTextColor(cMut);
-            topCanvas.drawString(l4, 10, y + 34);
+            tg.setTextColor(cMut);
+            tg.drawString(l4, 10, y + 34);
         }
     }
 
     if (n == 0) {
-        topCanvas.setTextColor(cMut);
+        tg.setTextColor(cMut);
         const char* l1 = "No sensor nodes yet";
         const char* l2 = "Add one: ` > NODES > ADD NODE";
-        topCanvas.drawString(l1, (W - topCanvas.textWidth(l1)) / 2, 90);
-        topCanvas.drawString(l2, (W - topCanvas.textWidth(l2)) / 2, 104);
+        tg.drawString(l1, (W - tg.textWidth(l1)) / 2, 90);
+        tg.drawString(l2, (W - tg.textWidth(l2)) / 2, 104);
     }
 
     // footer: log state | keys
@@ -137,15 +137,14 @@ static void drawHealth() {
     else if (!gHlog.on)      { snprintf(foot, sizeof(foot), "logging OFF"); fcol = cWarn; }
     else if (!gClockOk)      { snprintf(foot, sizeof(foot), "clock NOT set: no log"); fcol = cWarn; }
     else                     snprintf(foot, sizeof(foot), "log %.10s", gDayName);
-    topCanvas.setTextColor(fcol);
-    topCanvas.drawString(foot, 4, H - 10);
+    tg.setTextColor(fcol);
+    tg.drawString(foot, 4, H - 10);
     const char* hint = "[.] view  [n] cone";
-    topCanvas.setTextColor(topCanvas.color565(154, 106, 168));
-    topCanvas.drawString(hint, W - topCanvas.textWidth(hint) - 4, H - 10);
-    topCanvas.drawRect(0, 0, W, H, cBorder);
+    tg.setTextColor(tg.color565(154, 106, 168));
+    tg.drawString(hint, W - tg.textWidth(hint) - 4, H - 10);
+    tg.drawRect(0, 0, W, H, cBorder);
 
-    applyExtBrightness();
-    topCanvas.pushRotateZoom(160, 120, 0.0f, EXT_ZOOM, EXT_ZOOM);
+    topFramePresent();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

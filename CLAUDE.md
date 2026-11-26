@@ -64,7 +64,7 @@ room by room. Realistic target: **presence + motion** per room.
   present only by hold; cone shows "MOTION / a few seconds ago"). v1 nodes
   (8-field reports) are shown as before.
 
-## Second console build: ScreenDriver ILI9341 (fw 2.6.0-dev10, branch `ili9341-screendriver`)
+## Second console build: ScreenDriver ILI9341 (fw 2.6.0-dev10/dev11, merged into main by PR #9)
 - Env `cardputer-radar-csi-ili9341` (`-DEXT_SCREENDRIVER=1`): same app, top screen = ScreenDriver
   (XIAO ESP32-C6 + 2.8" ILI9341 320x240, repo `C:\workspaces\ScreenDriver`, library RemoteDisplay via
   `symlink://C:/workspaces/ScreenDriver/cardputer/lib/RemoteDisplay` + `-IC:/workspaces/ScreenDriver/shared`).
@@ -91,8 +91,9 @@ room by room. Realistic target: **presence + motion** per room.
   `onRedraw`). SCREEN OFF: brightness 0, `ext.poll()` in `serviceScreens()`. No issue-#6 backlight
   check (no GPIO4 backlight). SD: `hlogBegin()` mounts it alone (no shared panel bus).
 - The library needs ESP-IDF 5; this app is on core 2.0.17 (IDF 4.4). `ScreenDriver/shared/sd_link.h`
-  has `ESP_IDF_VERSION_MAJOR` guards (UART_SCLK_APB, no pin-state diagnostics on IDF 4.4). The link
-  on core 2 is not yet tested on hardware.
+  has `ESP_IDF_VERSION_MAJOR` guards (UART_SCLK_APB, no pin-state diagnostics on IDF 4.4), merged
+  into ScreenDriver main by its PR #1 (branch `idf44-compat` deleted). The link works on core 2
+  (user, 2026-11-26).
 - Local tools: esptool (platform 6.12.0) runs under the system Python 3.12; it needs `intelhex`.
 
 ## Sensor nodes (ESP32-WROOM-32/32D, `tools/node_esp32`)
@@ -256,9 +257,11 @@ room by room. Realistic target: **presence + motion** per room.
   startup task, replaces W32Time; Linux: chrony config or bundled Python server). For next step 3.
 
 ## Status (v2)
-🧪 fw 2.6.0-dev11 (branch `ili9341-screendriver`): ILI9341 build sends only changed bands (fix for the
-sideways jump). dev10: second console build for the ScreenDriver ILI9341 +
-XIAO C6 (env `cardputer-radar-csi-ili9341`); ST7789V build unchanged. Builds; not yet tested on hardware.
+🧪 fw 2.6.0-dev11 (main, merged from branch `ili9341-screendriver` by PR #9, branch deleted): ILI9341
+build sends only changed bands (fix for the sideways jump). dev10: second console build for the
+ScreenDriver ILI9341 + XIAO C6 (env `cardputer-radar-csi-ili9341`); ST7789V build unchanged.
+User confirmed on hardware (2026-11-26): views work, no jump. Not yet checked: unplug/replug and XIAO
+reset while running; SD logs, web page, SCREEN OFF and EXT PANEL brightness on this build.
 🧪 fw 2.6.0-dev9 (main): del key erases while typing the Wi-Fi password (`waitKey()` returns `'\b'` on `st.del`).
 🧪 fw 2.6.0-dev8 (main): Wi-Fi password shown in clear text while typing (tail shown, `<` prefix, past 35 chars).
 🧪 fw 2.6.0-dev7 (main, merged from branch `fix-issues-5-6-7` by PR #8, branch deleted): nodes RTC
